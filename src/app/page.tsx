@@ -5,7 +5,7 @@ import Image from 'next/image';
 // ===== TYPES =====
 type SparkleData = { left: string; top: string; animationDelay: string };
 
-// ===== AUDIO ENGINE (Web Audio API - no files needed) =====
+// ===== AUDIO ENGINE (Web Audio API - realistic instrument sounds) =====
 function useAudio() {
   const ctxRef = useRef<AudioContext | null>(null);
   const getCtx = useCallback(() => {
@@ -13,73 +13,181 @@ function useAudio() {
     return ctxRef.current;
   }, []);
 
-  const playNote = useCallback((freq: number, duration: number, type: OscillatorType = 'triangle') => {
+  // Realistic instrument synthesis
+  const playNote = useCallback((freq: number, duration: number, instrument: 'piano' | 'clarinet' | 'recorder' | 'kick' | 'punch' | 'block' = 'piano') => {
     try {
       const ctx = getCtx();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = type;
-      osc.frequency.value = freq;
-      gain.gain.setValueAtTime(0.3, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + duration);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + duration);
+      const now = ctx.currentTime;
+      
+      if (instrument === 'piano') {
+        // Piano: triangle + harmonics, sharp attack
+        const osc1 = ctx.createOscillator();
+        const osc2 = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc1.type = 'triangle';
+        osc1.frequency.value = freq;
+        osc2.type = 'sine';
+        osc2.frequency.value = freq * 2;
+        const g2 = ctx.createGain();
+        g2.gain.value = 0.2;
+        gain.gain.setValueAtTime(0.4, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + duration);
+        osc1.connect(gain);
+        osc2.connect(g2).connect(gain);
+        gain.connect(ctx.destination);
+        osc1.start(now); osc2.start(now);
+        osc1.stop(now + duration); osc2.stop(now + duration);
+      } else if (instrument === 'clarinet') {
+        // Clarinet: sawtooth + lowpass (warm, woody)
+        const osc = ctx.createOscillator();
+        const filter = ctx.createBiquadFilter();
+        const gain = ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.value = freq;
+        filter.type = 'lowpass';
+        filter.frequency.value = 1200;
+        filter.Q.value = 2;
+        gain.gain.setValueAtTime(0, now);
+        gain.gain.linearRampToValueAtTime(0.3, now + 0.05);
+        gain.gain.setValueAtTime(0.3, now + duration - 0.1);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + duration);
+        osc.connect(filter).connect(gain).connect(ctx.destination);
+        osc.start(now); osc.stop(now + duration);
+      } else if (instrument === 'recorder') {
+        // Recorder: sine + slight vibrato (breathy, pure)
+        const osc = ctx.createOscillator();
+        const lfo = ctx.createOscillator();
+        const lfoGain = ctx.createGain();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        lfo.type = 'sine';
+        lfo.frequency.value = 5;
+        lfoGain.gain.value = 3;
+        lfo.connect(lfoGain).connect(osc.frequency);
+        gain.gain.setValueAtTime(0.25, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + duration);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now); lfo.start(now);
+        osc.stop(now + duration); lfo.stop(now + duration);
+      } else if (instrument === 'kick') {
+        // Kick: low thump
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(150, now);
+        osc.frequency.exponentialRampToValueAtTime(50, now + 0.15);
+        gain.gain.setValueAtTime(0.6, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now); osc.stop(now + 0.3);
+      } else if (instrument === 'punch') {
+        // Punch: mid impact
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(300, now);
+        osc.frequency.exponentialRampToValueAtTime(100, now + 0.1);
+        gain.gain.setValueAtTime(0.4, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now); osc.stop(now + 0.15);
+      } else if (instrument === 'block') {
+        // Block: sharp snap
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.value = 800;
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now); osc.stop(now + 0.08);
+      }
     } catch (e) { /* silent fail */ }
   }, [getCtx]);
 
-  const playMelody = useCallback((notes: number[], tempo: number = 200) => {
-    notes.forEach((freq, i) => {
-      setTimeout(() => playNote(freq, 0.3), i * tempo);
+  // Play melody with instrument
+  const playMelody = useCallback((notes: { freq: number; dur: number }[], tempo: number = 200, instrument: 'piano' | 'clarinet' | 'recorder' = 'piano') => {
+    let t = 0;
+    notes.forEach((n) => {
+      setTimeout(() => playNote(n.freq, n.dur, instrument), t);
+      t += tempo;
     });
   }, [playNote]);
 
-  return { playNote, playMelody };
-}
-
-// ===== PIANO KEYBOARD =====
-function PianoKeyboard({ onClose, playNote }: { onClose: () => void; playNote: (f: number, d: number) => void }) {
-  const keys = [
-    { note: 'C4', freq: 261.63, white: true }, { note: 'C#4', freq: 277.18, white: false },
-    { note: 'D4', freq: 293.66, white: true }, { note: 'D#4', freq: 311.13, white: false },
-    { note: 'E4', freq: 329.63, white: true },
-    { note: 'F4', freq: 349.23, white: true }, { note: 'F#4', freq: 369.99, white: false },
-    { note: 'G4', freq: 392.0, white: true }, { note: 'G#4', freq: 415.3, white: false },
-    { note: 'A4', freq: 440.0, white: true }, { note: 'A#4', freq: 466.16, white: false },
-    { note: 'B4', freq: 493.88, white: true },
-    { note: 'C5', freq: 523.25, white: true },
+  // KPop Demon Hunters melodies
+  // Soda Pop: catchy synth-pop riff (recognizable pattern)
+  const sodaPopMelody = [
+    { freq: 329.63, dur: 0.2 }, { freq: 392.0, dur: 0.2 }, { freq: 440.0, dur: 0.3 },
+    { freq: 523.25, dur: 0.2 }, { freq: 440.0, dur: 0.2 }, { freq: 392.0, dur: 0.3 },
+    { freq: 329.63, dur: 0.2 }, { freq: 349.23, dur: 0.2 }, { freq: 392.0, dur: 0.4 },
+  ];
+  
+  // Golden: uplifting chorus melody
+  const goldenMelody = [
+    { freq: 523.25, dur: 0.3 }, { freq: 587.33, dur: 0.2 }, { freq: 659.25, dur: 0.3 },
+    { freq: 783.99, dur: 0.4 }, { freq: 659.25, dur: 0.2 }, { freq: 587.33, dur: 0.2 },
+    { freq: 523.25, dur: 0.3 }, { freq: 440.0, dur: 0.3 }, { freq: 523.25, dur: 0.4 },
   ];
 
+  return { playNote, playMelody, sodaPopMelody, goldenMelody };
+}
+
+// ===== PIANO KEYBOARD (32 keys: C3 to C6) =====
+function PianoKeyboard({ onClose, playNote }: { onClose: () => void; playNote: (f: number, d: number, inst?: any) => void }) {
+  // Generate 32 keys: C3 to C6 (roughly 3 octaves)
+  const generateKeys = () => {
+    const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+    const keys = [];
+    for (let octave = 3; octave <= 6; octave++) {
+      for (let i = 0; i < noteNames.length; i++) {
+        const note = noteNames[i];
+        const isBlack = note.includes('#');
+        const freq = 130.81 * Math.pow(2, (octave - 3) + i / 12);
+        keys.push({ note: `${note}${octave}`, freq, white: !isBlack });
+      }
+    }
+    return keys.slice(0, 37); // ~32 white+black keys
+  };
+
+  const keys = generateKeys();
+  const whiteKeys = keys.filter(k => k.white);
+  const blackKeys = keys.filter(k => !k.white);
+
+  // Calculate black key positions
+  const getBlackKeyLeft = (note: string) => {
+    const noteBase = note.replace(/\d/, '');
+    const octave = parseInt(note.match(/\d/)?.[0] || '4');
+    const positions: Record<string, number> = { 'C#': 0.7, 'D#': 1.7, 'F#': 3.7, 'G#': 4.7, 'A#': 5.7 };
+    const octaveOffset = (octave - 3) * 7;
+    return (positions[noteBase] || 0) + octaveOffset;
+  };
+
   return (
-    <div className="fixed inset-0 z-[9000] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-gradient-to-b from-gray-900 to-gray-800 rounded-3xl p-8 shadow-2xl" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[9000] flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-gradient-to-b from-gray-900 via-gray-800 to-gray-900 rounded-3xl p-6 shadow-2xl max-w-full overflow-x-auto" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-4">
-          <h3 className="text-2xl font-bold text-white">🎹 Piano</h3>
-          <button onClick={onClose} className="text-white/60 hover:text-white text-2xl">✕</button>
+          <h3 className="text-2xl font-bold text-white">🎹 32-Key Piano</h3>
+          <button onClick={onClose} className="text-white/60 hover:text-white text-2xl px-3">✕</button>
         </div>
-        <div className="relative flex">
-          {keys.filter(k => k.white).map((k) => (
+        <div className="relative flex" style={{ minWidth: '800px' }}>
+          {whiteKeys.map((k) => (
             <button key={k.note}
-              onMouseDown={() => playNote(k.freq, 0.5)}
-              className="w-12 h-40 bg-gradient-to-b from-white to-gray-100 rounded-b-lg border border-gray-300 mx-0.5 hover:from-yellow-100 hover:to-yellow-200 active:scale-95 transition-all shadow-md" />
+              onMouseDown={() => playNote(k.freq, 0.6, 'piano')}
+              className="w-10 h-44 bg-gradient-to-b from-white via-gray-50 to-gray-200 border border-gray-300 mx-[1px] rounded-b-lg hover:from-yellow-100 hover:to-yellow-300 active:scale-95 transition-all shadow-md active:bg-yellow-200" />
           ))}
-          {keys.filter(k => !k.white).map((k, i) => {
-            const blackPositions = [0.75, 1.75, 3.75, 4.75, 5.75, 7.75, 8.75];
-            return (
-              <button key={k.note}
-                onMouseDown={() => playNote(k.freq, 0.5)}
-                className="absolute w-8 h-24 bg-gradient-to-b from-gray-800 to-black rounded-b-lg hover:from-purple-900 hover:to-purple-800 active:scale-95 transition-all shadow-lg z-10"
-                style={{ left: `${blackPositions[i] * 52}px` }} />
-            );
-          })}
+          {blackKeys.map((k) => (
+            <button key={k.note}
+              onMouseDown={() => playNote(k.freq, 0.5, 'piano')}
+              className="absolute w-7 h-28 bg-gradient-to-b from-gray-700 to-black rounded-b-lg hover:from-purple-700 hover:to-purple-900 active:scale-95 transition-all shadow-lg z-10"
+              style={{ left: `${getBlackKeyLeft(k.note) * 42}px` }} />
+          ))}
         </div>
-        <p className="text-white/40 text-center mt-4 text-sm">Click keys to play!</p>
+        <p className="text-white/40 text-center mt-4 text-sm">3 octaves: C3 → C6 🎵</p>
       </div>
     </div>
   );
 }
-
 // ===== POKEMON EFFECTS =====
 function PokemonEffect({ type, x, y, onDone }: { type: string; x: number; y: number; onDone: () => void }) {
   useEffect(() => { const t = setTimeout(onDone, 2000); return () => clearTimeout(t); }, [onDone]);
@@ -108,6 +216,8 @@ function PokemonEffect({ type, x, y, onDone }: { type: string; x: number; y: num
     </div>
   );
 }
+
+// ===== CUSTOM CURSOR =====
 function CustomCursor() {
   const [pos, setPos] = useState({ x: 0, y: 0 });
   const [trails, setTrails] = useState<{ x: number; y: number; id: number }[]>([]);
@@ -130,9 +240,9 @@ function CustomCursor() {
           left: t.x - 10, top: t.y - 10,
           opacity: (i + 1) / trails.length * 0.5,
           transform: `scale(${(i + 1) / trails.length})`,
-        }}>⚡</span>
+        }}>⭐</span>
       ))}
-      <span className="absolute text-2xl transition-all duration-100" style={{ left: pos.x - 12, top: pos.y - 12 }}>⚡</span>
+      <span className="absolute text-3xl transition-transform duration-100" style={{ left: pos.x - 15, top: pos.y - 15, transform: 'rotate(0deg)' }}>⚡</span>
     </div>
   );
 }
@@ -141,116 +251,76 @@ function CustomCursor() {
 function ScrollProgress() {
   const [progress, setProgress] = useState(0);
   useEffect(() => {
-    const onScroll = () => {
-      const h = document.documentElement.scrollHeight - window.innerHeight;
-      setProgress(h > 0 ? window.scrollY / h : 0);
-    };
-    window.addEventListener('scroll', onScroll);
-    return () => window.removeEventListener('scroll', onScroll);
+    const onScroll = () => { const h = document.documentElement.scrollHeight - window.innerHeight; setProgress(h > 0 ? (window.scrollY / h) * 100 : 0); };
+    window.addEventListener('scroll', onScroll); return () => window.removeEventListener('scroll', onScroll);
   }, []);
-  return <div className="fixed top-0 left-0 h-1 bg-gradient-to-r from-pink-500 via-yellow-400 via-green-400 via-blue-400 to-purple-500 z-[100] transition-all duration-100" style={{ width: `${progress * 100}%` }} />;
+  return <div className="fixed top-0 left-0 h-1 bg-gradient-to-r from-pink-500 via-purple-500 to-blue-500 z-[100]" style={{ width: `${progress}%` }} />;
+}
+
+// ===== SPARKLES =====
+function useSparkles(count: number) {
+  const [sparkles, setSparkles] = useState<SparkleData[]>([]);
+  useEffect(() => { setSparkles(Array.from({ length: count }, () => ({ left: `${Math.random() * 100}%`, top: `${Math.random() * 100}%`, animationDelay: `${Math.random() * 5}s` }))); }, [count]);
+  return sparkles;
+}
+
+function Sparkle({ style }: { style: SparkleData }) {
+  return <span className="absolute text-yellow-300 text-xl animate-pulse pointer-events-none z-0" style={style}>✨</span>;
 }
 
 // ===== LOADING SCREEN =====
 function LoadingScreen({ onFinish }: { onFinish: () => void }) {
   const [progress, setProgress] = useState(0);
   useEffect(() => {
-    const timer = setInterval(() => {
-      setProgress(p => {
-        if (p >= 100) { clearInterval(timer); setTimeout(onFinish, 300); return 100; }
-        return p + 4;
-      });
-    }, 40);
-    return () => clearInterval(timer);
+    const iv = setInterval(() => { setProgress(p => { if (p >= 100) { clearInterval(iv); setTimeout(onFinish, 300); return 100; } return p + 2; }); }, 40);
+    return () => clearInterval(iv);
   }, [onFinish]);
   return (
-    <div className="fixed inset-0 bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 z-[10000] flex flex-col items-center justify-center">
-      <div className="text-8xl mb-6 animate-bounce">⚡</div>
-      <h1 className="text-4xl font-bold text-white mb-4">Jayden&apos;s World</h1>
-      <div className="w-64 h-3 bg-white/20 rounded-full overflow-hidden">
-        <div className="h-full bg-gradient-to-r from-yellow-400 to-pink-500 rounded-full transition-all duration-200" style={{ width: `${progress}%` }} />
+    <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center">
+      <div className="text-center">
+        <div className="text-6xl mb-4 animate-bounce">⚡</div>
+        <h1 className="text-3xl font-bold text-white mb-4">Jayden&apos;s World</h1>
+        <div className="w-64 h-3 bg-purple-800 rounded-full overflow-hidden"><div className="h-full bg-gradient-to-r from-pink-500 to-yellow-500 transition-all" style={{ width: `${progress}%` }} /></div>
+        <p className="text-purple-300 mt-2">{progress}%</p>
       </div>
-      <p className="text-white/60 mt-3 text-sm">Loading magic... {progress}%</p>
     </div>
   );
 }
 
-// ===== NAV DOTS =====
-function NavDots({ sections, active }: { sections: string[]; active: number }) {
-  const scrollTo = (i: number) => document.getElementById(sections[i])?.scrollIntoView({ behavior: 'smooth' });
-  return (
-    <nav className="fixed right-4 top-1/2 -translate-y-1/2 z-50 hidden md:flex flex-col gap-3">
-      {sections.map((_, i) => (
-        <button key={i} onClick={() => scrollTo(i)}
-          className={`w-3 h-3 rounded-full transition-all duration-300 ${i === active ? 'bg-white scale-125 shadow-lg shadow-white/50' : 'bg-white/30 hover:bg-white/60'}`} />
-      ))}
-    </nav>
-  );
+// ===== REVEAL ON SCROLL =====
+function RevealSection({ children }: { children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [show, setShow] = useState(false);
+  useEffect(() => { const obs = new IntersectionObserver(([e]) => { if (e.isIntersecting) setShow(true); }, { threshold: 0.1 }); if (ref.current) obs.observe(ref.current); return () => obs.disconnect(); }, []);
+  return <div ref={ref} className={`transition-all duration-1000 ${show ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10'}`}>{children}</div>;
 }
 
-// ===== SPARKLES =====
-function useSparkles(count: number): SparkleData[] {
-  const [sparkles, setSparkles] = useState<SparkleData[]>([]);
-  useEffect(() => {
-    setSparkles(Array.from({ length: count }).map(() => ({
-      left: `${Math.random() * 100}%`, top: `${Math.random() * 100}%`, animationDelay: `${Math.random() * 3}s`,
-    })));
-  }, [count]);
-  return sparkles;
-}
-
-function Sparkle({ style }: { style: React.CSSProperties }) {
-  return <div className="absolute w-2 h-2 bg-yellow-300 rounded-full animate-ping pointer-events-none" style={style} />;
+// ===== TILT CARD =====
+function TiltCard({ children }: { children: React.ReactNode }) {
+  const [style, setStyle] = useState({});
+  const ref = useRef<HTMLDivElement>(null);
+  const onMove = (e: React.MouseEvent) => {
+    if (!ref.current) return;
+    const r = ref.current.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width - 0.5;
+    const y = (e.clientY - r.top) / r.height - 0.5;
+    setStyle({ transform: `perspective(600px) rotateY(${x * 10}deg) rotateX(${-y * 10}deg)` });
+  };
+  return <div ref={ref} onMouseMove={onMove} onMouseLeave={() => setStyle({})} style={style} className="transition-transform duration-200">{children}</div>;
 }
 
 // ===== FLOATING EMOJI =====
 function FloatingEmoji({ emoji, delay, left }: { emoji: string; delay: number; left: string }) {
-  return (
-    <span className="absolute text-4xl animate-bounce opacity-70 pointer-events-none select-none"
-      style={{ left, top: '20%', animationDelay: `${delay}s`, animationDuration: '3s' }}>{emoji}</span>
-  );
+  return <span className="absolute text-4xl animate-bounce pointer-events-none opacity-30" style={{ left, top: `${20 + Math.random() * 60}%`, animationDelay: `${delay}s`, animationDuration: '3s' }}>{emoji}</span>;
 }
 
-// ===== SCROLL REVEAL HOOK =====
-function useScrollReveal() {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const obs = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) { el.classList.add('revealed'); obs.disconnect(); }
-    }, { threshold: 0.15 });
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, []);
-  return ref;
-}
-
-function RevealSection({ children, className = '', delay = 0 }: { children: React.ReactNode; className?: string; delay?: number }) {
-  const ref = useScrollReveal();
+// ===== NAV DOTS =====
+function NavDots({ sections, active }: { sections: string[]; active: number }) {
   return (
-    <div ref={ref} className={`reveal-section ${className}`} style={{ transitionDelay: `${delay}ms` }}>
-      {children}
-    </div>
-  );
-}
-
-// ===== 3D TILT CARD =====
-function TiltCard({ children, className = '' }: { children: React.ReactNode; className?: string }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const handleMove = useCallback((e: React.MouseEvent) => {
-    const el = ref.current; if (!el) return;
-    const r = el.getBoundingClientRect();
-    const x = (e.clientX - r.left) / r.width - 0.5;
-    const y = (e.clientY - r.top) / r.height - 0.5;
-    el.style.transform = `perspective(600px) rotateY(${x * 15}deg) rotateX(${-y * 15}deg) scale(1.05)`;
-  }, []);
-  const handleLeave = useCallback(() => {
-    if (ref.current) ref.current.style.transform = 'perspective(600px) rotateY(0) rotateX(0) scale(1)';
-  }, []);
-  return (
-    <div ref={ref} onMouseMove={handleMove} onMouseLeave={handleLeave} className={`transition-transform duration-200 ${className}`}>
-      {children}
+    <div className="fixed right-4 top-1/2 -translate-y-1/2 z-50 hidden md:flex flex-col gap-2">
+      {sections.map((id, i) => (
+        <a key={id} href={`#${id}`} className={`w-3 h-3 rounded-full transition-all ${i === active ? 'bg-pink-400 scale-125' : 'bg-white/30 hover:bg-white/60'}`} title={id} />
+      ))}
     </div>
   );
 }
@@ -258,87 +328,24 @@ function TiltCard({ children, className = '' }: { children: React.ReactNode; cla
 // ===== VIRTUAL PIKACHU =====
 function VirtualPikachu() {
   const [mood, setMood] = useState('happy');
-  const [hearts, setHearts] = useState<{ id: number }[]>([]);
   const [hunger, setHunger] = useState(80);
-  const heartId = useRef(0);
-
-  useEffect(() => {
-    const timer = setInterval(() => setHunger(h => Math.max(0, h - 2)), 3000);
-    return () => clearInterval(timer);
-  }, []);
-
-  const pet = () => {
-    setMood('love');
-    heartId.current++;
-    setHearts(h => [...h.slice(-5), { id: heartId.current }]);
-    setTimeout(() => setMood('happy'), 1500);
-  };
-  const feed = () => { setHunger(h => Math.min(100, h + 20)); setMood('eating'); setTimeout(() => setMood('happy'), 1500); };
-
-  return (
-    <div className="text-center p-6">
-      <div className="relative inline-block">
-        <div onClick={pet} className="text-8xl cursor-pointer hover:scale-110 transition-transform select-none">
-          {mood === 'love' ? '🥰' : mood === 'eating' ? '😋' : hunger < 30 ? '😢' : '😊'}
-        </div>
-        {hearts.map(h => (
-          <span key={h.id} className="absolute -top-2 left-1/2 text-2xl animate-float-up">❤️</span>
-        ))}
-      </div>
-      <div className="mt-4 flex justify-center gap-3">
-        <button onClick={pet} className="px-4 py-2 bg-pink-500 rounded-full text-white font-bold hover:scale-110 transition">💕 Pet</button>
-        <button onClick={feed} className="px-4 py-2 bg-yellow-500 rounded-full text-white font-bold hover:scale-110 transition">🍖 Feed</button>
-      </div>
-      <div className="mt-3 w-48 mx-auto">
-        <div className="text-xs text-white/60 mb-1">Hunger: {hunger}%</div>
-        <div className="h-2 bg-white/20 rounded-full overflow-hidden">
-          <div className={`h-full rounded-full transition-all duration-500 ${hunger > 50 ? 'bg-green-400' : hunger > 20 ? 'bg-yellow-400' : 'bg-red-400'}`} style={{ width: `${hunger}%` }} />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ===== DRAWING CANVAS =====
-function DrawingCanvas() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [isDrawing, setIsDrawing] = useState(false);
-  const [color, setColor] = useState('#FF69B4');
-
-  const startDraw = (e: React.MouseEvent) => {
-    const ctx = canvasRef.current?.getContext('2d');
-    if (!ctx) return;
-    ctx.beginPath();
-    ctx.moveTo(e.nativeEvent.offsetX, e.nativeEvent.offsetY);
-    setIsDrawing(true);
-  };
-  const draw = (e: React.MouseEvent) => {
-    if (!isDrawing) return;
-    const ctx = canvasRef.current?.getContext('2d');
-    if (!ctx) return;
-    ctx.lineTo(e.nativeEvent.offsetX, e.nativeEvent.offsetY);
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 4;
-    ctx.lineCap = 'round';
-    ctx.stroke();
-  };
-  const endDraw = () => setIsDrawing(false);
-  const clear = () => {
-    const ctx = canvasRef.current?.getContext('2d');
-    if (!ctx || !canvasRef.current) return;
-    ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-  };
-
+  const [energy, setEnergy] = useState(90);
+  const poke = () => setMood(m => m === 'happy' ? 'excited' : 'happy');
+  const feed = () => { setHunger(h => Math.min(100, h + 15)); setMood('eating'); setTimeout(() => setMood('happy'), 1500); };
+  const play = () => { setEnergy(e => Math.max(0, e - 10)); setMood('playing'); setTimeout(() => setMood('happy'), 2000); };
+  const faces: Record<string, string> = { happy: '(◕‿◕)', excited: '(★‿★)', eating: '(◕ᴗ◕)🍕', playing: '(≧▽≦)⚡', tired: '(─‿─)💤' };
   return (
     <div className="text-center">
-      <canvas ref={canvasRef} width={350} height={250}
-        className="bg-white rounded-2xl cursor-crosshair mx-auto shadow-xl"
-        onMouseDown={startDraw} onMouseMove={draw} onMouseUp={endDraw} onMouseLeave={endDraw} />
-      <div className="flex justify-center gap-2 mt-4">
-        {['#FF69B4', '#FFD700', '#00BFFF', '#FF4500', '#32CD32', '#9370DB'].map(c => (
-          <button key={c} onClick={() => setColor(c)} className={`w-8 h-8 rounded-full border-2 transition-transform hover:scale-125 ${color === c ? 'border-white scale-125' : 'border-transparent'}`} style={{ backgroundColor: c }} />
-        ))}
-        <button onClick={clear} className="px-4 py-1 bg-white/20 rounded-full text-white text-sm hover:bg-white/30 transition">🗑️ Clear</button>
+      <div className="text-8xl mb-4 cursor-pointer hover:scale-110 transition" onClick={poke}>⚡</div>
+      <div className="text-3xl mb-4">{faces[mood]}</div>
+      <div className="grid grid-cols-2 gap-4 mb-4">
+        <div><span className="text-sm">🍎 Hunger</span><div className="h-3 bg-gray-700 rounded-full mt-1"><div className="h-full bg-green-500 rounded-full transition-all" style={{ width: `${hunger}%` }} /></div></div>
+        <div><span className="text-sm">⚡ Energy</span><div className="h-3 bg-gray-700 rounded-full mt-1"><div className="h-full bg-yellow-500 rounded-full transition-all" style={{ width: `${energy}%` }} /></div></div>
+      </div>
+      <div className="flex justify-center gap-3">
+        <button onClick={feed} className="px-4 py-2 bg-green-500 rounded-full hover:scale-110 transition">🍎 Feed</button>
+        <button onClick={play} className="px-4 py-2 bg-yellow-500 rounded-full hover:scale-110 transition text-black">🎾 Play</button>
+        <button onClick={poke} className="px-4 py-2 bg-pink-500 rounded-full hover:scale-110 transition">🤗 Poke</button>
       </div>
     </div>
   );
@@ -346,59 +353,45 @@ function DrawingCanvas() {
 
 // ===== MEMORY GAME =====
 function MemoryGame() {
-  const emojis = ['⚡', '🕷️', '🎵', '🥋', '⭐', '🎮', '💫', '🌟'];
-  const [cards, setCards] = useState<string[]>([]);
-  const [flipped, setFlipped] = useState<number[]>([]);
-  const [matched, setMatched] = useState<number[]>([]);
-  const [gameWon, setGameWon] = useState(false);
-
-  useEffect(() => { setCards([...emojis, ...emojis].sort(() => Math.random() - 0.5)); }, []);
-
-  const handleFlip = (index: number) => {
-    if (flipped.length === 2 || flipped.includes(index) || matched.includes(index)) return;
-    const newFlipped = [...flipped, index];
-    setFlipped(newFlipped);
-    if (newFlipped.length === 2) {
-      if (cards[newFlipped[0]] === cards[newFlipped[1]]) {
-        const m = [...matched, ...newFlipped]; setMatched(m); setFlipped([]);
-        if (m.length === cards.length) setGameWon(true);
-      } else setTimeout(() => setFlipped([]), 1000);
+  const emojis = ['🕷️', '⚡', '🎵', '🥋', '⭐', '🎨', '🎮', '🍕'];
+  const [cards, setCards] = useState<{ id: number; emoji: string; flipped: boolean; matched: boolean }[]>([]);
+  const [selected, setSelected] = useState<number[]>([]);
+  const [moves, setMoves] = useState(0);
+  useEffect(() => { const d = [...emojis, ...emojis].sort(() => Math.random() - 0.5).map((emoji, i) => ({ id: i, emoji, flipped: false, matched: false })); setCards(d); }, []);
+  useEffect(() => {
+    if (selected.length === 2) {
+      setMoves(m => m + 1);
+      const [a, b] = selected;
+      if (cards[a].emoji === cards[b].emoji) { setCards(c => c.map((card, i) => (i === a || i === b ? { ...card, matched: true } : card))); setSelected([]); }
+      else setTimeout(() => setSelected([]), 800);
     }
-  };
-  const reset = () => { setCards([...emojis, ...emojis].sort(() => Math.random() - 0.5)); setMatched([]); setFlipped([]); setGameWon(false); };
-
+  }, [selected, cards]);
+  const flip = (i: number) => { if (selected.length < 2 && !cards[i].matched && !cards[i].flipped) setSelected(s => [...s, i]); };
   return (
     <div className="text-center">
-      {gameWon && <div className="mb-4 text-2xl font-bold text-yellow-300 animate-bounce">🎉 You Won! 🎉</div>}
-      <div className="grid grid-cols-4 gap-3 max-w-xs mx-auto">
-        {cards.map((emoji, i) => (
-          <button key={i} onClick={() => handleFlip(i)}
-            className={`aspect-square text-3xl rounded-xl transition-all duration-300 transform ${flipped.includes(i) || matched.includes(i) ? 'bg-gradient-to-br from-purple-500 to-pink-500' : 'bg-gradient-to-br from-blue-600 to-purple-700 hover:scale-105'} ${matched.includes(i) ? 'ring-4 ring-yellow-400' : ''}`}>
-            {flipped.includes(i) || matched.includes(i) ? emoji : '❓'}
+      <div className="mb-3 text-lg font-bold text-yellow-300">Moves: {moves}</div>
+      <div className="grid grid-cols-4 gap-2 max-w-xs mx-auto">
+        {cards.map((c, i) => (
+          <button key={c.id} onClick={() => flip(i)} className={`w-14 h-14 rounded-xl text-2xl transition-all ${c.matched ? 'bg-green-500/50' : selected.includes(i) ? 'bg-purple-500' : 'bg-indigo-600 hover:bg-indigo-500'} ${c.matched ? 'scale-90' : 'hover:scale-105'}`}>
+            {c.matched || selected.includes(i) ? c.emoji : '❓'}
           </button>
         ))}
       </div>
-      <button onClick={reset} className="mt-4 px-6 py-2 bg-pink-500 hover:bg-pink-600 rounded-full text-white font-bold transition">🔄 New Game</button>
+      {cards.every(c => c.matched) && <div className="mt-3 text-green-400 font-bold animate-bounce">🎉 You Won!</div>}
     </div>
   );
 }
 
 // ===== STAR CATCH GAME =====
 function StarCatchGame() {
+  const [active, setActive] = useState(false);
   const [score, setScore] = useState(0);
   const [stars, setStars] = useState<{ id: number; x: number; y: number }[]>([]);
-  const [active, setActive] = useState(false);
-
   useEffect(() => {
     if (!active) return;
-    const iv = setInterval(() => {
-      const s = { id: Date.now(), x: Math.random() * 80 + 10, y: Math.random() * 80 + 10 };
-      setStars(p => [...p, s]);
-      setTimeout(() => setStars(p => p.filter(x => x.id !== s.id)), 1500);
-    }, 800);
+    const iv = setInterval(() => { setStars(s => [...s.slice(-5), { id: Date.now(), x: Math.random() * 80 + 10, y: Math.random() * 70 + 10 }]); }, 600);
     return () => clearInterval(iv);
   }, [active]);
-
   return (
     <div className="text-center">
       <div className="mb-4 text-xl font-bold text-yellow-300">⭐ Score: {score}</div>
@@ -417,6 +410,29 @@ function StarCatchGame() {
   );
 }
 
+// ===== DRAWING CANVAS =====
+function DrawingCanvas() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [drawing, setDrawing] = useState(false);
+  const [color, setColor] = useState('#ff69b4');
+  const start = (e: React.MouseEvent) => { setDrawing(true); const ctx = canvasRef.current?.getContext('2d'); if (ctx) { ctx.beginPath(); ctx.moveTo(e.nativeEvent.offsetX, e.nativeEvent.offsetY); } };
+  const move = (e: React.MouseEvent) => {
+    if (!drawing || !canvasRef.current) return;
+    const ctx = canvasRef.current.getContext('2d'); if (!ctx) return;
+    ctx.lineTo(e.nativeEvent.offsetX, e.nativeEvent.offsetY); ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.stroke();
+  };
+  const end = () => setDrawing(false);
+  const clear = () => { const ctx = canvasRef.current?.getContext('2d'); if (ctx && canvasRef.current) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height); };
+  const colors = ['#ff69b4', '#ff0000', '#ff8c00', '#ffff00', '#00ff00', '#00bfff', '#8a2be2', '#ffffff'];
+  return (
+    <div className="text-center">
+      <div className="flex justify-center gap-2 mb-3">{colors.map(c => (<button key={c} onClick={() => setColor(c)} className={`w-8 h-8 rounded-full border-2 ${color === c ? 'border-white scale-110' : 'border-transparent'} transition`} style={{ backgroundColor: c }} />))}</div>
+      <canvas ref={canvasRef} width={300} height={250} className="bg-white rounded-2xl mx-auto cursor-crosshair" onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end} />
+      <button onClick={clear} className="mt-3 px-6 py-2 bg-red-500 rounded-full text-white font-bold">🗑️ Clear</button>
+    </div>
+  );
+}
+
 // ===== MAIN HOME =====
 export default function Home() {
   const [loading, setLoading] = useState(true);
@@ -424,21 +440,13 @@ export default function Home() {
   const [showPiano, setShowPiano] = useState(false);
   const [pokeEffect, setPokeEffect] = useState<{ type: string; x: number; y: number } | null>(null);
   const sparkles = useSparkles(30);
-  const sectionIds = ['hero', 'about', 'food', 'kpop', 'music', 'taekwondo', 'pokemon', 'spiderman', 'pikachu', 'games', 'art', 'dreams'];
-  const { playNote, playMelody } = useAudio();
-
-  // Melodies
-  const sodaPopMelody = [523, 587, 659, 698, 784, 698, 659, 587]; // C D E F G F E D
-  const goldenMelody = [784, 880, 988, 1047, 988, 880, 784, 659]; // G A B C B A G E
-  const clarinetMelody = [262, 294, 330, 349, 392, 349, 330, 294];
-  const recorderMelody = [523, 494, 440, 392, 349, 330, 294, 262];
-  const pianoMelody = [262, 330, 392, 523, 392, 330, 262, 196];
+  const sectionIds = ['hero', 'about', 'food', 'kpop', 'music', 'taekwondo', 'pokemon', 'artwork', 'spiderman', 'pikachu', 'games', 'art', 'dreams'];
+  const { playNote, playMelody, sodaPopMelody, goldenMelody } = useAudio();
 
   const triggerPokeEffect = (type: string, e: React.MouseEvent) => {
     setPokeEffect({ type, x: e.clientX, y: e.clientY });
-    // Play sound effect
     const freqs: Record<string, number> = { Electric: 800, Fire: 300, Water: 600, Grass: 400, Normal: 500, Fairy: 900, 'Fire/Flying': 350, Psychic: 700 };
-    playNote(freqs[type] || 500, 0.3, 'sawtooth');
+    playNote(freqs[type] || 500, 0.3, 'punch');
   };
 
   useEffect(() => {
@@ -456,7 +464,6 @@ export default function Home() {
       <CustomCursor />
       <ScrollProgress />
       <NavDots sections={sectionIds} active={activeSection} />
-
       {sparkles.map((s, i) => <Sparkle key={i} style={s} />)}
 
       {/* HERO */}
@@ -488,7 +495,7 @@ export default function Home() {
           <div className="grid md:grid-cols-3 gap-6">
             {[
               { icon: '🎂', title: 'Age', value: '4 Years Old', color: 'from-pink-500 to-rose-500' },
-              { icon: '', title: 'Born', value: 'Hong Kong', color: 'from-blue-500 to-cyan-500', isFlag: true },
+              { title: 'Born', value: 'Hong Kong', color: 'from-blue-500 to-cyan-500', isFlag: true },
               { icon: '⚡', title: 'Superpower', value: 'Being Awesome!', color: 'from-yellow-500 to-orange-500' },
               { icon: '🏃', title: 'Personality', value: 'Active & Energetic', color: 'from-green-500 to-emerald-500' },
               { icon: '😄', title: 'Vibe', value: 'Outgoing & Confident', color: 'from-purple-500 to-violet-500' },
@@ -510,24 +517,26 @@ export default function Home() {
         </div>
       </section></RevealSection>
 
-      {/* FOOD */}
-      <RevealSection><section id="food" className="py-20 px-4 bg-gradient-to-b from-transparent via-amber-800/20 to-transparent">
+      {/* FAVOURITE FOOD */}
+      <RevealSection><section id="food" className="py-20 px-4 bg-gradient-to-b from-transparent via-orange-800/20 to-transparent">
         <div className="max-w-4xl mx-auto">
-          <h2 className="text-4xl md:text-5xl font-bold text-center mb-4 bg-gradient-to-r from-orange-300 to-yellow-400 bg-clip-text text-transparent">🥟 My Favorite Foods 🥟</h2>
-          <p className="text-center text-orange-200 mb-12 text-lg">Hong Kong dim sum is the best!</p>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-2xl mx-auto">
+          <h2 className="text-4xl md:text-5xl font-bold text-center mb-12 bg-gradient-to-r from-orange-300 to-yellow-400 bg-clip-text text-transparent">😋 Favourite Food</h2>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
             {[
-              { name: '燒賣', en: 'Siu Mai', desc: 'My #1 favorite!', color: 'from-orange-400 to-red-500', image: '/images/food/siumai.svg' },
-              { name: '蝦餃', en: 'Har Gow', desc: 'So yummy!', emoji: '🦐', color: 'from-pink-400 to-pink-600' },
+              { name: 'Siu Mai', emoji: '', desc: 'Dim sum champion!', color: 'from-orange-400 to-red-500', isSiuMai: true },
+              { name: 'French Fries', emoji: '🍟', desc: 'Crispy & golden!', color: 'from-yellow-400 to-amber-500' },
+              { name: 'Chicken', emoji: '🍗', desc: 'Yummy & juicy!', color: 'from-amber-400 to-orange-500' },
+              { name: 'Fish Stick', emoji: '🐟', desc: 'Ocean goodness!', color: 'from-blue-400 to-cyan-500' },
             ].map((item, i) => (
               <TiltCard key={i}>
-                <div className={`p-8 rounded-3xl bg-gradient-to-br ${item.color} text-center shadow-xl`}>
-                  {item.image ? (
-                    <div className="relative w-28 h-28 mx-auto mb-4"><Image src={item.image} alt={item.name} fill className="object-contain drop-shadow-xl" /></div>
-                  ) : <div className="text-6xl mb-4">{item.emoji}</div>}
-                  <h3 className="text-3xl font-bold mb-2">{item.name}</h3>
-                  <p className="text-white/80 mb-2">{item.en}</p>
-                  <p className="text-sm opacity-70">{item.desc}</p>
+                <div className={`p-6 rounded-3xl bg-gradient-to-br ${item.color} shadow-xl text-center`}>
+                  {(item as any).isSiuMai ? (
+                    <div className="mb-3 flex justify-center"><Image src="/images/siu-mai.svg" alt="Siu Mai" width={80} height={80} className="drop-shadow-lg" /></div>
+                  ) : (
+                    <div className="text-6xl mb-3">{item.emoji}</div>
+                  )}
+                  <h3 className="text-xl font-bold">{item.name}</h3>
+                  <p className="text-sm opacity-80">{item.desc}</p>
                 </div>
               </TiltCard>
             ))}
@@ -536,19 +545,10 @@ export default function Home() {
       </section></RevealSection>
 
       {/* K-POP */}
-      <RevealSection><section id="kpop" className="py-20 px-4 bg-gradient-to-b from-transparent via-pink-800/20 to-transparent overflow-hidden">
+      <RevealSection><section id="kpop" className="py-20 px-4 bg-gradient-to-b from-transparent via-pink-800/20 to-transparent">
         <div className="max-w-4xl mx-auto">
-          <h2 className="text-4xl md:text-5xl font-bold text-center mb-4 bg-gradient-to-r from-pink-400 to-purple-400 bg-clip-text text-transparent">🎤 K-pop Dancing Star 🎤</h2>
-          <p className="text-center text-pink-200 mb-12 text-lg">I love dancing to K-pop songs!</p>
-          <div className="flex justify-center mb-12">
-            <div className="relative">
-              <div className="text-8xl animate-dance">🧒</div>
-              <span className="absolute -top-4 -left-8 text-3xl animate-float-1">🎵</span>
-              <span className="absolute -top-2 -right-10 text-2xl animate-float-2">🎶</span>
-              <span className="absolute top-8 -left-12 text-xl animate-float-3">✨</span>
-              <span className="absolute top-10 -right-8 text-2xl animate-float-1">⭐</span>
-            </div>
-          </div>
+          <h2 className="text-4xl md:text-5xl font-bold text-center mb-4 bg-gradient-to-r from-pink-300 to-purple-400 bg-clip-text text-transparent">🎤 K-Pop Demon Hunters 🎤</h2>
+          <p className="text-center text-purple-200 mb-12 text-lg">My favorite songs! (from the movie Hunties)</p>
           <div className="grid md:grid-cols-2 gap-8">
             {[
               { song: 'Soda Pop', desc: 'Catchy beats! 🎶', color: 'from-cyan-400 to-blue-500', icon: '🥤', melody: sodaPopMelody },
@@ -556,11 +556,11 @@ export default function Home() {
             ].map((item, i) => (
               <TiltCard key={i}>
                 <div className={`p-8 rounded-3xl bg-gradient-to-br ${item.color} shadow-2xl relative overflow-hidden group cursor-pointer`}
-                     onClick={() => playMelody(item.melody, 180)}>
+                     onClick={() => playMelody(item.melody, 250, 'piano')}>
                   <div className="text-6xl mb-4 text-center animate-bounce">{item.icon}</div>
                   <h3 className="text-3xl font-bold text-center mb-2">{item.song}</h3>
                   <p className="text-center text-sm opacity-70">{item.desc}</p>
-                  <p className="text-center text-xs mt-2 text-white/50">🎵 Click to play!</p>
+                  <p className="text-center text-xs mt-2 text-white/50">🎵 Click to play melody!</p>
                   <div className="flex justify-center gap-2 mt-4">
                     {['💃', '🕺', '🎵', '🎶', '✨'].map((e, j) => (
                       <span key={j} className="text-2xl opacity-0 group-hover:opacity-100 group-hover:animate-bounce transition-all duration-300" style={{ animationDelay: `${j * 0.15}s`, transitionDelay: `${j * 0.1}s` }}>{e}</span>
@@ -581,16 +581,25 @@ export default function Home() {
       <RevealSection><section id="music" className="py-20 px-4 bg-gradient-to-b from-transparent via-purple-800/30 to-transparent">
         <div className="max-w-4xl mx-auto">
           <h2 className="text-4xl md:text-5xl font-bold text-center mb-4 bg-gradient-to-r from-cyan-300 to-purple-400 bg-clip-text text-transparent">🎵 My Musical Adventure 🎵</h2>
-          <p className="text-center text-purple-200 mb-12 text-lg">Learning to make beautiful music!</p>
+          <p className="text-center text-purple-200 mb-12 text-lg">Click to hear real instrument sounds!</p>
           <div className="grid md:grid-cols-3 gap-6 mt-8">
             {[
-              { icon: '🎵', name: 'Clarinet', desc: 'My jazzy friend!', status: 'Learning', color: 'from-blue-500 to-indigo-600', melody: clarinetMelody },
-              { icon: '🎶', name: 'Recorder', desc: 'My first instrument!', status: 'Playing', color: 'from-green-500 to-teal-600', melody: recorderMelody },
-              { icon: '🎹', name: 'Piano', desc: 'Making melodies!', status: 'Practicing', color: 'from-purple-500 to-pink-600', isPiano: true },
+              { icon: '🎵', name: 'Clarinet', desc: 'My jazzy friend!', status: 'Learning', color: 'from-blue-500 to-indigo-600', instrument: 'clarinet' as const, melody: [
+                { freq: 261.63, dur: 0.4 }, { freq: 293.66, dur: 0.3 }, { freq: 329.63, dur: 0.4 },
+                { freq: 349.23, dur: 0.3 }, { freq: 392.0, dur: 0.5 },
+              ]},
+              { icon: '🎶', name: 'Recorder', desc: 'My first instrument!', status: 'Playing', color: 'from-green-500 to-teal-600', instrument: 'recorder' as const, melody: [
+                { freq: 523.25, dur: 0.3 }, { freq: 493.88, dur: 0.3 }, { freq: 440.0, dur: 0.4 },
+                { freq: 392.0, dur: 0.3 }, { freq: 349.23, dur: 0.5 },
+              ]},
+              { icon: '🎹', name: 'Piano', desc: '32 keys to play!', status: 'Practicing', color: 'from-purple-500 to-pink-600', isPiano: true, melody: [
+                { freq: 261.63, dur: 0.3 }, { freq: 329.63, dur: 0.3 }, { freq: 392.0, dur: 0.4 },
+                { freq: 523.25, dur: 0.3 }, { freq: 392.0, dur: 0.3 }, { freq: 329.63, dur: 0.5 },
+              ]},
             ].map((item, i) => (
               <TiltCard key={i}>
                 <div className={`p-6 rounded-3xl bg-gradient-to-br ${item.color} text-center shadow-xl cursor-pointer group`}
-                     onClick={() => (item as any).isPiano ? setShowPiano(true) : playMelody((item as any).melody, 180)}>
+                     onClick={() => (item as any).isPiano ? setShowPiano(true) : playMelody(item.melody, 220, item.instrument)}>
                   <div className="text-6xl mb-4">{item.icon}</div>
                   <h3 className="text-2xl font-bold mb-2">{item.name}</h3>
                   <p className="text-white/80 mb-3">{item.desc}</p>
@@ -625,15 +634,17 @@ export default function Home() {
           </div>
           <div className="grid md:grid-cols-3 gap-6">
             {[
-              { icon: '🦵', move: 'High Kick', desc: 'Sky-high power!' },
-              { icon: '👊', move: 'Punch Combo', desc: 'Fast and strong!' },
-              { icon: '🛡️', move: 'Blocking', desc: 'Super defense!' },
+              { icon: '🦵', move: 'High Kick', desc: 'Sky-high power!', sound: 'kick' as const },
+              { icon: '👊', move: 'Punch Combo', desc: 'Fast and strong!', sound: 'punch' as const },
+              { icon: '🛡️', move: 'Blocking', desc: 'Super defense!', sound: 'block' as const },
             ].map((item, i) => (
               <TiltCard key={i}>
-                <div className="p-6 rounded-3xl bg-gradient-to-br from-red-600 to-orange-700 text-center shadow-lg">
+                <div className="p-6 rounded-3xl bg-gradient-to-br from-red-600 to-orange-700 text-center shadow-lg cursor-pointer hover:scale-105 transition"
+                     onClick={() => playNote(100, 0.3, item.sound)}>
                   <div className="text-5xl mb-3">{item.icon}</div>
                   <h3 className="text-xl font-bold">{item.move}</h3>
                   <p className="text-white/80">{item.desc}</p>
+                  <p className="text-xs mt-2 text-white/50">🔊 Click for sound!</p>
                 </div>
               </TiltCard>
             ))}
@@ -669,6 +680,25 @@ export default function Home() {
                 </div>
               </TiltCard>
             ))}
+          </div>
+        </div>
+      </section></RevealSection>
+
+      {/* ARTWORK - 小金魚逃走了 */}
+      <RevealSection><section id="artwork" className="py-20 px-4 bg-gradient-to-b from-transparent via-orange-800/20 to-transparent">
+        <div className="max-w-4xl mx-auto text-center">
+          <h2 className="text-4xl md:text-5xl font-bold mb-4 bg-gradient-to-r from-orange-300 to-yellow-400 bg-clip-text text-transparent">🐟 小金魚逃走了 🐟</h2>
+          <p className="text-orange-200 mb-8 text-lg">Click the picture to play!</p>
+          <div className="max-w-md mx-auto">
+            <a href="https://www.hkcot.com/goldfish/" target="_blank" rel="noopener noreferrer"
+               className="block p-8 bg-gradient-to-br from-orange-400 to-yellow-500 rounded-3xl shadow-2xl hover:scale-105 transition-all duration-300 group">
+              <div className="bg-white/20 rounded-2xl p-12 mb-4">
+                <div className="text-8xl group-hover:animate-bounce">🐟</div>
+              </div>
+              <h3 className="text-2xl font-bold text-white mb-2">小金魚逃走了</h3>
+              <p className="text-white/80 text-sm">Click to find the goldfish!</p>
+              <p className="text-white/50 text-xs mt-2">(Artwork coming soon)</p>
+            </a>
           </div>
         </div>
       </section></RevealSection>
