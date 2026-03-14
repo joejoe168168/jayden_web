@@ -198,7 +198,7 @@ function PianoKeyboard({ onClose, playNote, initAudio }: { onClose: () => void; 
   const allKeys = generateKeys();
   const whiteKeys = allKeys.filter(k => k.white);
   const blackKeys = allKeys.filter(k => k.black);
-  const keyWidth = isPhone ? 42 : 38;
+  const keyWidth = isPhone ? 46 : 38;
 
   // Black key left offset: position relative to white key index
   const getBlackKeyLeft = (note: string) => {
@@ -225,7 +225,7 @@ function PianoKeyboard({ onClose, playNote, initAudio }: { onClose: () => void; 
 
   return (
     <div className="fixed inset-0 z-[9000] flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-gradient-to-b from-gray-900 via-gray-800 to-gray-900 rounded-t-3xl sm:rounded-3xl p-4 pb-8 sm:pb-4 shadow-2xl w-full sm:w-auto" onClick={e => e.stopPropagation()}>
+      <div className="bg-gradient-to-b from-gray-900 via-gray-800 to-gray-900 rounded-t-3xl sm:rounded-3xl p-4 pb-8 sm:pb-4 shadow-2xl" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-3">
           <h3 className="text-xl font-bold text-white">🎹 Piano</h3>
           <button onClick={onClose} className="text-white/60 hover:text-white text-2xl px-3">✕</button>
