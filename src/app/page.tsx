@@ -4,6 +4,10 @@ import Image from 'next/image';
 
 // ===== TYPES =====
 type SparkleData = { left: string; top: string; animationDelay: string };
+type InstrumentName = 'piano' | 'clarinet' | 'recorder' | 'kick' | 'punch' | 'block';
+type NoteEvent = { freq: number; dur: number };
+type PianoKey = { note: string; freq: number; white: boolean; black: boolean; whiteIndex: number };
+type StarItem = { id: number; x: number; y: number; size: number; bornAt: number; fading: boolean };
 
 // ===== AUDIO ENGINE (Web Audio API - iOS compatible) =====
 // iOS Safari rule: AudioContext MUST be created/resumed inside a direct user gesture.
@@ -11,16 +15,65 @@ type SparkleData = { left: string; top: string; animationDelay: string };
 function useAudio() {
   const ctxRef = useRef<AudioContext | null>(null);
   const unlockedRef = useRef(false);
+  const noiseBufferRef = useRef<AudioBuffer | null>(null);
+  // Sample cache: keyed by instrument name
+  const sampleCacheRef = useRef<Record<string, AudioBuffer>>({});
+  const sampleLoadingRef = useRef<Record<string, Promise<AudioBuffer | null>>>({});
+
+  // Base frequencies of each sample (the root pitch recorded in the MP3)
+  const SAMPLE_BASE: Record<string, number> = { piano: 261.63, clarinet: 261.63, recorder: 261.63 };
+
+  const loadSample = useCallback(async (instrument: string, ctx: AudioContext): Promise<AudioBuffer | null> => {
+    if (sampleCacheRef.current[instrument]) return sampleCacheRef.current[instrument];
+    const inflight = sampleLoadingRef.current[instrument];
+    if (inflight) return inflight;
+    const urls: Record<string, string> = {
+      piano: '/sounds/piano-note.mp3',
+      clarinet: '/sounds/clarinet-note.mp3',
+      recorder: '/sounds/recorder-note.mp3',
+    };
+    const url = urls[instrument];
+    if (!url) return null;
+    const p = fetch(url)
+      .then(r => r.arrayBuffer())
+      .then(ab => ctx.decodeAudioData(ab))
+      .then(buf => { sampleCacheRef.current[instrument] = buf; return buf; })
+      .catch(() => null);
+    sampleLoadingRef.current[instrument] = p;
+    return p;
+  }, []);
+
+  const getAudioContext = useCallback(() => {
+    try {
+      const AC = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AC) return null;
+      if (!ctxRef.current) {
+        ctxRef.current = new AC();
+      }
+      return ctxRef.current;
+    } catch (_e) {
+      return null;
+    }
+  }, []);
+
+  const getNoiseBuffer = useCallback((ctx: AudioContext) => {
+    if (noiseBufferRef.current && noiseBufferRef.current.sampleRate === ctx.sampleRate) {
+      return noiseBufferRef.current;
+    }
+    const buffer = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+    const channel = buffer.getChannelData(0);
+    for (let i = 0; i < channel.length; i += 1) {
+      channel[i] = (Math.random() * 2 - 1) * 0.7;
+    }
+    noiseBufferRef.current = buffer;
+    return buffer;
+  }, []);
 
   // Must be called synchronously inside a touch/click handler
   const initAudio = useCallback(() => {
     try {
-      const AC = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AC) return;
-      if (!ctxRef.current) {
-        ctxRef.current = new AC();
-      }
-      const ctx = ctxRef.current;
+      const ctx = getAudioContext();
+      if (!ctx) return;
       // Unlock: resume + play a zero-gain buffer synchronously inside the gesture
       if (!unlockedRef.current || ctx.state === 'suspended' || ctx.state === 'interrupted') {
         ctx.resume();
@@ -34,70 +87,44 @@ function useAudio() {
         unlockedRef.current = true;
       }
     } catch (_e) {}
-  }, []);
+  }, [getAudioContext]);
 
-  // Realistic instrument synthesis
-  const playNote = useCallback((freq: number, duration: number, instrument: 'piano' | 'clarinet' | 'recorder' | 'kick' | 'punch' | 'block' = 'piano') => {
+  // Realistic instrument synthesis (uses real MP3 samples for piano/clarinet/recorder)
+  const playNote = useCallback((freq: number, duration: number, instrument: InstrumentName = 'piano') => {
     try {
-      // Ensure context exists; create inside this call if needed (iOS gesture path)
-      const AC = window.AudioContext || (window as any).webkitAudioContext;
-      if (!ctxRef.current) ctxRef.current = new AC();
-      const ctx = ctxRef.current;
+      const ctx = getAudioContext();
+      if (!ctx) return;
       if (ctx.state !== 'running') ctx.resume();
-      const now = ctx.currentTime;
-      
-      if (instrument === 'piano') {
-        // Piano: triangle + harmonics, sharp attack
-        const osc1 = ctx.createOscillator();
-        const osc2 = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc1.type = 'triangle';
-        osc1.frequency.value = freq;
-        osc2.type = 'sine';
-        osc2.frequency.value = freq * 2;
-        const g2 = ctx.createGain();
-        g2.gain.value = 0.2;
-        gain.gain.setValueAtTime(0.4, now);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + duration);
-        osc1.connect(gain);
-        osc2.connect(g2).connect(gain);
-        gain.connect(ctx.destination);
-        osc1.start(now); osc2.start(now);
-        osc1.stop(now + duration); osc2.stop(now + duration);
-      } else if (instrument === 'clarinet') {
-        // Clarinet: sawtooth + lowpass (warm, woody)
-        const osc = ctx.createOscillator();
-        const filter = ctx.createBiquadFilter();
-        const gain = ctx.createGain();
-        osc.type = 'sawtooth';
-        osc.frequency.value = freq;
-        filter.type = 'lowpass';
-        filter.frequency.value = 1200;
-        filter.Q.value = 2;
-        gain.gain.setValueAtTime(0, now);
-        gain.gain.linearRampToValueAtTime(0.3, now + 0.05);
-        gain.gain.setValueAtTime(0.3, now + duration - 0.1);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + duration);
-        osc.connect(filter).connect(gain).connect(ctx.destination);
-        osc.start(now); osc.stop(now + duration);
-      } else if (instrument === 'recorder') {
-        // Recorder: sine + slight vibrato (breathy, pure)
-        const osc = ctx.createOscillator();
-        const lfo = ctx.createOscillator();
-        const lfoGain = ctx.createGain();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.value = freq;
-        lfo.type = 'sine';
-        lfo.frequency.value = 5;
-        lfoGain.gain.value = 3;
-        lfo.connect(lfoGain).connect(osc.frequency);
-        gain.gain.setValueAtTime(0.25, now);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + duration);
-        osc.connect(gain).connect(ctx.destination);
-        osc.start(now); lfo.start(now);
-        osc.stop(now + duration); lfo.stop(now + duration);
-      } else if (instrument === 'kick') {
+
+      // --- Real sample playback ---
+      if (instrument === 'piano' || instrument === 'clarinet' || instrument === 'recorder') {
+        const baseFreq = SAMPLE_BASE[instrument] || 261.63;
+        const detuneCents = 1200 * Math.log2(freq / baseFreq);
+        loadSample(instrument, ctx).then(buf => {
+          if (!buf) return; // fallback handled below via synthesis
+          const now = ctx.currentTime + 0.01;
+          const src = ctx.createBufferSource();
+          src.buffer = buf;
+          src.detune.value = detuneCents;
+          const gainNode = ctx.createGain();
+          gainNode.gain.setValueAtTime(0.85, now);
+          gainNode.gain.setValueAtTime(0.85, now + duration);
+          gainNode.gain.exponentialRampToValueAtTime(0.0001, now + duration + 0.4);
+          src.connect(gainNode).connect(ctx.destination);
+          src.start(now);
+          src.stop(now + duration + 0.5);
+        }).catch(() => {/* ignore, synthesis fallback not triggered async */});
+        return; // return early; sample path is async above
+      }
+
+      const now = ctx.currentTime + 0.01;
+      const releaseTail = Math.max(0.08, duration * 0.45);
+      const stopAt = now + duration + releaseTail + 0.08;
+      const output = ctx.createGain();
+      output.gain.value = 0.92;
+      output.connect(ctx.destination);
+
+      if (instrument === 'kick') {
         // Kick: low thump
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
@@ -106,7 +133,7 @@ function useAudio() {
         osc.frequency.exponentialRampToValueAtTime(50, now + 0.15);
         gain.gain.setValueAtTime(0.6, now);
         gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
-        osc.connect(gain).connect(ctx.destination);
+        osc.connect(gain).connect(output);
         osc.start(now); osc.stop(now + 0.3);
       } else if (instrument === 'punch') {
         // Punch: mid impact
@@ -117,7 +144,7 @@ function useAudio() {
         osc.frequency.exponentialRampToValueAtTime(100, now + 0.1);
         gain.gain.setValueAtTime(0.4, now);
         gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
-        osc.connect(gain).connect(ctx.destination);
+        osc.connect(gain).connect(output);
         osc.start(now); osc.stop(now + 0.15);
       } else if (instrument === 'block') {
         // Block: sharp snap
@@ -127,89 +154,98 @@ function useAudio() {
         osc.frequency.value = 800;
         gain.gain.setValueAtTime(0.3, now);
         gain.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
-        osc.connect(gain).connect(ctx.destination);
+        osc.connect(gain).connect(output);
         osc.start(now); osc.stop(now + 0.08);
       }
     } catch (e) { /* silent fail */ }
-  }, []);
+  }, [getAudioContext, loadSample]);
 
   // Play melody with instrument
-  const playMelody = useCallback((notes: { freq: number; dur: number }[], tempo: number = 200, instrument: 'piano' | 'clarinet' | 'recorder' = 'piano') => {
+  const playMelody = useCallback((notes: NoteEvent[], tempo: number = 200, instrument: 'piano' | 'clarinet' | 'recorder' = 'piano') => {
     let t = 0;
     notes.forEach((n) => {
-      setTimeout(() => playNote(n.freq, n.dur, instrument), t);
-      t += tempo;
+      setTimeout(() => playNote(n.freq, Math.max(0.16, n.dur), instrument), t);
+      t += Math.max(tempo, n.dur * 760);
     });
   }, [playNote]);
 
-  // KPop Demon Hunters melodies
-  // Soda Pop: catchy synth-pop riff (recognizable pattern)
-  const sodaPopMelody = [
-    { freq: 329.63, dur: 0.2 }, { freq: 392.0, dur: 0.2 }, { freq: 440.0, dur: 0.3 },
-    { freq: 523.25, dur: 0.2 }, { freq: 440.0, dur: 0.2 }, { freq: 392.0, dur: 0.3 },
-    { freq: 329.63, dur: 0.2 }, { freq: 349.23, dur: 0.2 }, { freq: 392.0, dur: 0.4 },
+  // Longer kid-friendly melodic motifs inspired by the songs' energy.
+  const s = 0.24;
+  const sodaPopMelody: NoteEvent[] = [
+    { freq: 523.25, dur: s }, { freq: 659.25, dur: s * 0.85 }, { freq: 783.99, dur: s * 0.85 }, { freq: 880.0, dur: s },
+    { freq: 783.99, dur: s * 0.85 }, { freq: 659.25, dur: s * 0.85 }, { freq: 587.33, dur: s }, { freq: 523.25, dur: s * 1.5 },
+    { freq: 587.33, dur: s }, { freq: 659.25, dur: s }, { freq: 698.46, dur: s }, { freq: 783.99, dur: s * 1.15 },
+    { freq: 698.46, dur: s * 0.85 }, { freq: 659.25, dur: s * 0.85 }, { freq: 587.33, dur: s }, { freq: 523.25, dur: s * 1.4 },
+    { freq: 523.25, dur: s * 0.75 }, { freq: 587.33, dur: s * 0.75 }, { freq: 659.25, dur: s * 0.75 }, { freq: 783.99, dur: s },
+    { freq: 880.0, dur: s }, { freq: 783.99, dur: s }, { freq: 659.25, dur: s }, { freq: 587.33, dur: s * 1.1 },
+    { freq: 523.25, dur: s }, { freq: 659.25, dur: s * 0.85 }, { freq: 783.99, dur: s * 0.85 }, { freq: 987.77, dur: s * 1.2 },
+    { freq: 880.0, dur: s }, { freq: 783.99, dur: s }, { freq: 698.46, dur: s }, { freq: 659.25, dur: s * 1.2 },
+    { freq: 587.33, dur: s }, { freq: 659.25, dur: s }, { freq: 698.46, dur: s }, { freq: 783.99, dur: s },
+    { freq: 698.46, dur: s * 0.85 }, { freq: 659.25, dur: s * 0.85 }, { freq: 587.33, dur: s }, { freq: 523.25, dur: s * 1.8 },
   ];
-  
-  // Golden: uplifting chorus melody
-  const goldenMelody = [
-    { freq: 523.25, dur: 0.3 }, { freq: 587.33, dur: 0.2 }, { freq: 659.25, dur: 0.3 },
-    { freq: 783.99, dur: 0.4 }, { freq: 659.25, dur: 0.2 }, { freq: 587.33, dur: 0.2 },
-    { freq: 523.25, dur: 0.3 }, { freq: 440.0, dur: 0.3 }, { freq: 523.25, dur: 0.4 },
+
+  const g = 0.26;
+  const goldenMelody: NoteEvent[] = [
+    { freq: 440.0, dur: g }, { freq: 493.88, dur: g * 0.9 }, { freq: 523.25, dur: g * 0.9 }, { freq: 659.25, dur: g * 1.1 },
+    { freq: 587.33, dur: g * 0.9 }, { freq: 523.25, dur: g * 0.9 }, { freq: 493.88, dur: g }, { freq: 440.0, dur: g * 1.4 },
+    { freq: 440.0, dur: g * 0.8 }, { freq: 493.88, dur: g * 0.8 }, { freq: 523.25, dur: g * 0.8 }, { freq: 587.33, dur: g * 0.9 },
+    { freq: 659.25, dur: g * 1.2 }, { freq: 783.99, dur: g }, { freq: 659.25, dur: g }, { freq: 587.33, dur: g * 1.2 },
+    { freq: 523.25, dur: g }, { freq: 587.33, dur: g }, { freq: 659.25, dur: g }, { freq: 783.99, dur: g * 1.1 },
+    { freq: 880.0, dur: g * 1.1 }, { freq: 783.99, dur: g }, { freq: 659.25, dur: g }, { freq: 523.25, dur: g * 1.25 },
+    { freq: 587.33, dur: g }, { freq: 659.25, dur: g }, { freq: 739.99, dur: g }, { freq: 880.0, dur: g * 1.05 },
+    { freq: 987.77, dur: g * 1.15 }, { freq: 880.0, dur: g }, { freq: 783.99, dur: g }, { freq: 659.25, dur: g * 1.05 },
+    { freq: 523.25, dur: g }, { freq: 659.25, dur: g }, { freq: 783.99, dur: g }, { freq: 880.0, dur: g * 1.15 },
+    { freq: 783.99, dur: g }, { freq: 659.25, dur: g }, { freq: 587.33, dur: g }, { freq: 523.25, dur: g * 1.9 },
   ];
 
   return { playNote, playMelody, sodaPopMelody, goldenMelody, initAudio };
 }
 
-// ===== PIANO KEYBOARD (iPhone: 1 octave white keys, Desktop: 3 octaves) =====
-function PianoKeyboard({ onClose, playNote, initAudio }: { onClose: () => void; playNote: (f: number, d: number, inst?: any) => void; initAudio: () => void }) {
+// ===== PIANO KEYBOARD (mobile: 16 white keys, desktop: 3 octaves) =====
+function PianoKeyboard({ onClose, playNote, initAudio }: { onClose: () => void; playNote: (f: number, d: number, inst?: InstrumentName) => void; initAudio: () => void }) {
   const [isPhone, setIsPhone] = useState(false);
   useEffect(() => {
-    setIsPhone(/iPhone|iPod|Android.*Mobile/i.test(navigator.userAgent));
+    const checkScreen = () => {
+      setIsPhone(window.innerWidth < 768 || /iPhone|iPod|Android.*Mobile/i.test(navigator.userAgent));
+    };
+    checkScreen();
+    window.addEventListener('resize', checkScreen);
+    return () => window.removeEventListener('resize', checkScreen);
   }, []);
 
-  // All notes in order (semitones from C)
   const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
-  const generateKeys = () => {
-    if (isPhone) {
-      // iPhone: 1 octave white keys only (C4-C5) = 8 white keys, very playable
-      const whiteNotes = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
-      const semitones:  Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
-      return whiteNotes.map(n => ({
-        note: `${n}4`,
-        freq: 261.63 * Math.pow(2, semitones[n] / 12),
-        white: true,
-        black: false,
-      }));
+  const generateKeys = (): PianoKey[] => {
+    const startMidi = isPhone ? 60 : 48;
+    const endMidi = isPhone ? 86 : 84;
+    let whiteIndex = 0;
+    const keys: PianoKey[] = [];
+
+    for (let midi = startMidi; midi <= endMidi; midi += 1) {
+      const semitone = midi % 12;
+      const note = noteNames[semitone];
+      const octave = Math.floor(midi / 12) - 1;
+      const white = !note.includes('#');
+      keys.push({
+        note: `${note}${octave}`,
+        freq: 440 * Math.pow(2, (midi - 69) / 12),
+        white,
+        black: !white,
+        whiteIndex: white ? whiteIndex++ : Math.max(0, whiteIndex - 1),
+      });
     }
-    // Desktop: C3 → C6 full (white + black)
-    const keys: { note: string; freq: number; white: boolean; black: boolean }[] = [];
-    for (let octave = 3; octave <= 6; octave++) {
-      for (let i = 0; i < noteNames.length; i++) {
-        if (octave === 6 && i > 0) break; // stop at C6
-        const note = noteNames[i];
-        const freq = 130.81 * Math.pow(2, (octave - 3) * 12 / 12 + i / 12);
-        keys.push({ note: `${note}${octave}`, freq, white: !note.includes('#'), black: note.includes('#') });
-      }
-    }
+
     return keys;
   };
 
   const allKeys = generateKeys();
   const whiteKeys = allKeys.filter(k => k.white);
   const blackKeys = allKeys.filter(k => k.black);
-  const keyWidth = isPhone ? 46 : 38;
+  const keyWidth = isPhone ? 42 : 38;
+  const keyGap = 2;
+  const blackWidth = Math.round(keyWidth * 0.62);
 
-  // Black key left offset: position relative to white key index
-  const getBlackKeyLeft = (note: string) => {
-    const noteBase = note.replace(/\d+/, '');
-    const octave = parseInt(note.match(/\d+/)?.[0] || '4');
-    // semitone offsets within octave → white key index offset
-    const blackOffsets: Record<string, number> = { 'C#': 0.65, 'D#': 1.65, 'F#': 3.65, 'G#': 4.65, 'A#': 5.65 };
-    const octaveWhiteCount = 7;
-    const octaveOffset = (octave - 3) * octaveWhiteCount;
-    return (blackOffsets[noteBase] ?? 0) + octaveOffset;
-  };
+  const getBlackKeyLeft = (key: PianoKey) => ((key.whiteIndex + 1) * (keyWidth + keyGap)) - Math.round(blackWidth / 2);
 
   const handleWhiteKey = (freq: number) => {
     initAudio();
@@ -221,24 +257,24 @@ function PianoKeyboard({ onClose, playNote, initAudio }: { onClose: () => void; 
   };
 
   const totalWhiteKeys = whiteKeys.length;
-  const pianoWidth = totalWhiteKeys * (keyWidth + 2);
+  const pianoWidth = totalWhiteKeys * (keyWidth + keyGap);
 
   return (
     <div className="fixed inset-0 z-[9000] flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-gradient-to-b from-gray-900 via-gray-800 to-gray-900 rounded-t-3xl sm:rounded-3xl p-4 pb-8 sm:pb-4 shadow-2xl" onClick={e => e.stopPropagation()}>
+      <div className="bg-gradient-to-b from-gray-900 via-gray-800 to-gray-900 rounded-t-3xl sm:rounded-3xl p-4 pb-8 sm:pb-4 shadow-2xl w-full max-w-5xl" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-3">
           <h3 className="text-xl font-bold text-white">🎹 Piano</h3>
           <button onClick={onClose} className="text-white/60 hover:text-white text-2xl px-3">✕</button>
         </div>
         {/* Scrollable piano keys */}
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto pb-2">
           <div className="relative flex" style={{ width: `${pianoWidth}px`, minWidth: `${pianoWidth}px` }}>
             {whiteKeys.map((k) => (
               <button key={k.note}
                 onTouchStart={(e) => { e.preventDefault(); handleWhiteKey(k.freq); }}
                 onMouseDown={() => handleWhiteKey(k.freq)}
                 className={`bg-gradient-to-b from-white via-gray-50 to-gray-200 border border-gray-300 mx-[1px] rounded-b-lg active:from-yellow-200 active:to-yellow-400 active:scale-95 transition-all shadow-md flex-shrink-0`}
-                style={{ width: `${keyWidth}px`, height: isPhone ? '160px' : '180px' }}
+                style={{ width: `${keyWidth}px`, height: isPhone ? '170px' : '180px' }}
               />
             ))}
             {blackKeys.map((k) => (
@@ -247,15 +283,15 @@ function PianoKeyboard({ onClose, playNote, initAudio }: { onClose: () => void; 
                 onMouseDown={() => handleBlackKey(k.freq)}
                 className={`absolute bg-gradient-to-b from-gray-700 to-black rounded-b-lg active:from-purple-700 active:to-purple-900 active:scale-95 transition-all shadow-lg z-10`}
                 style={{
-                  width: `${Math.round(keyWidth * 0.62)}px`,
+                  width: `${blackWidth}px`,
                   height: isPhone ? '100px' : '110px',
-                  left: `${getBlackKeyLeft(k.note) * (keyWidth + 2)}px`,
+                  left: `${getBlackKeyLeft(k)}px`,
                 }}
               />
             ))}
           </div>
         </div>
-        <p className="text-white/40 text-center mt-3 text-sm">{isPhone ? '7 white keys · C4–B4' : '3 octaves: C3 → C6'} 🎵</p>
+        <p className="text-white/40 text-center mt-3 text-sm">{isPhone ? '16 white keys · two scales · swipe to scroll' : '3 octaves: C3 → C6'} 🎵</p>
       </div>
     </div>
   );
@@ -297,13 +333,14 @@ function CustomCursor() {
 
   useEffect(() => {
     const move = (e: MouseEvent) => {
+      trailId.current += 1;
+      const id = trailId.current;
       setPos({ x: e.clientX, y: e.clientY });
-      trailId.current++;
-      setTrails(prev => [...prev.slice(-8), { x: e.clientX, y: e.clientY, id: trailId.current }]);
+      setTrails(prev => [...prev.slice(-8), { x: e.clientX, y: e.clientY, id }]);
     };
     window.addEventListener('mousemove', move);
     return () => window.removeEventListener('mousemove', move);
-  }, []);
+  }, []); 
 
   return (
     <div className="fixed inset-0 pointer-events-none z-[9999] hidden md:block">
@@ -458,26 +495,55 @@ function MemoryGame() {
 function StarCatchGame() {
   const [active, setActive] = useState(false);
   const [score, setScore] = useState(0);
-  const [timeLeft, setTimeLeft] = useState(30);
-  const [stars, setStars] = useState<{ id: number; x: number; y: number }[]>([]);
+  const [timeLeft, setTimeLeft] = useState(25);
+  const [stars, setStars] = useState<StarItem[]>([]);
+  const starId = useRef(0);
+
+  const removeStar = useCallback((id: number) => {
+    setStars(prev => prev.filter(star => star.id !== id));
+  }, []);
+
+  const catchStar = useCallback((id: number) => {
+    setScore(sc => sc + 1);
+    setStars(prev => prev.filter(star => star.id !== id));
+  }, []);
+
+  const spawnStar = useCallback(() => {
+    starId.current += 1;
+    const id = starId.current;
+    const nextStar: StarItem = {
+      id,
+      x: Math.random() * 72 + 10,
+      y: Math.random() * 55 + 12,
+      size: Math.random() * 10 + 54,
+      bornAt: Date.now(),
+      fading: false,
+    };
+    setStars(prev => {
+      if (prev.length >= 3) return prev;
+      return [...prev, nextStar];
+    });
+    window.setTimeout(() => {
+      setStars(prev => prev.map(star => (star.id === id ? { ...star, fading: true } : star)));
+    }, 1800);
+    window.setTimeout(() => removeStar(id), 2500);
+  }, [removeStar]);
 
   useEffect(() => {
     if (!active) return;
-    // Timer countdown
     const timer = setInterval(() => {
       setTimeLeft(t => {
         if (t <= 1) { setActive(false); return 0; }
         return t - 1;
       });
     }, 1000);
-    // Spawn stars
     const starSpawner = setInterval(() => {
-      setStars(s => [...s.slice(-5), { id: Date.now(), x: Math.random() * 80 + 10, y: Math.random() * 70 + 10 }]);
-    }, 600);
+      spawnStar();
+    }, 1100);
     return () => { clearInterval(timer); clearInterval(starSpawner); };
-  }, [active]);
+  }, [active, spawnStar]);
 
-  const startGame = () => { setActive(true); setScore(0); setTimeLeft(30); setStars([]); };
+  const startGame = () => { setActive(true); setScore(0); setTimeLeft(25); setStars([]); };
 
   return (
     <div className="text-center">
@@ -485,7 +551,8 @@ function StarCatchGame() {
         <div className="text-xl font-bold text-yellow-300">⭐ {score}</div>
         <div className={`text-xl font-bold ${timeLeft <= 5 ? 'text-red-400 animate-pulse' : 'text-white'}`}>⏱️ {timeLeft}s</div>
       </div>
-      {!active && timeLeft === 30 ? (
+      <p className="text-sm text-white/70 mb-4">Tap or touch the glowing stars. They appear one by one and stay catchable.</p>
+      {!active && timeLeft === 25 ? (
         <button onClick={startGame} className="px-8 py-3 bg-gradient-to-r from-yellow-400 to-orange-500 rounded-full font-bold text-xl hover:scale-110 transition">⭐ Start Game!</button>
       ) : !active && timeLeft === 0 ? (
         <div>
@@ -494,14 +561,230 @@ function StarCatchGame() {
           <button onClick={startGame} className="px-8 py-3 bg-gradient-to-r from-yellow-400 to-orange-500 rounded-full font-bold text-xl hover:scale-110 transition">🔄 Play Again!</button>
         </div>
       ) : (
-        <div className="relative w-full h-64 bg-gradient-to-b from-indigo-900 to-purple-900 rounded-2xl overflow-hidden">
+        <div className="relative w-full h-72 bg-gradient-to-b from-indigo-900 via-indigo-800 to-purple-900 rounded-2xl overflow-hidden border border-white/10">
+          <div className="absolute inset-x-0 top-0 h-10 bg-gradient-to-b from-white/10 to-transparent" />
+          <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-pink-500/20 to-transparent" />
           {stars.map(s => (
-            <button key={s.id} onClick={() => { setScore(sc => sc + 1); setStars(p => p.filter(x => x.id !== s.id)); }}
-              className="absolute text-3xl animate-ping hover:scale-150 transition" style={{ left: `${s.x}%`, top: `${s.y}%` }}>⭐</button>
+            <button
+              key={s.id}
+              onTouchStart={(e) => { e.preventDefault(); catchStar(s.id); }}
+              onClick={() => catchStar(s.id)}
+              className={`absolute rounded-full flex items-center justify-center transition-all duration-500 touch-none ${s.fading ? 'opacity-0 scale-75' : 'opacity-100 scale-100'} animate-pulse`}
+              style={{
+                left: `${s.x}%`,
+                top: `${s.y}%`,
+                width: `${s.size}px`,
+                height: `${s.size}px`,
+                transform: `translate(-50%, -50%) scale(${s.fading ? 0.75 : 1})`,
+                background: 'radial-gradient(circle, rgba(255,245,157,0.95) 0%, rgba(255,196,0,0.85) 55%, rgba(255,145,0,0.2) 100%)',
+                boxShadow: '0 0 24px rgba(255, 221, 87, 0.6)',
+                touchAction: 'manipulation',
+              }}
+            >
+              <span className="text-3xl leading-none">⭐</span>
+            </button>
           ))}
         </div>
       )}
-      {active && <button onClick={() => { setActive(false); setTimeLeft(30); }} className="mt-3 px-6 py-2 bg-red-500 rounded-full text-white font-bold">Stop</button>}
+      {active && <button onClick={() => { setActive(false); setTimeLeft(25); setStars([]); }} className="mt-3 px-6 py-2 bg-red-500 rounded-full text-white font-bold">Stop</button>}
+    </div>
+  );
+}
+
+// ===== SPIDER-MAN TAP GAME =====
+function SpiderManWebGame({ playNote, initAudio }: { playNote: (freq: number, duration: number, instrument?: InstrumentName) => void; initAudio: () => void }) {
+  const [running, setRunning] = useState(false);
+  const [score, setScore] = useState(0);
+  const [timeLeft, setTimeLeft] = useState(20);
+  const [targets, setTargets] = useState<{ id: number; x: number; y: number; emoji: string }[]>([]);
+  const idRef = useRef(0);
+
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(() => {
+      setTimeLeft(t => {
+        if (t <= 1) {
+          setRunning(false);
+          return 0;
+        }
+        return t - 1;
+      });
+    }, 1000);
+    const spawner = setInterval(() => {
+      idRef.current += 1;
+      const targetId = idRef.current;
+      const emoji = Math.random() > 0.45 ? '🦹' : '🤖';
+      setTargets(prev => [...prev.slice(-4), { id: targetId, x: Math.random() * 76 + 8, y: Math.random() * 50 + 14, emoji }]);
+      window.setTimeout(() => {
+        setTargets(prev => prev.filter(target => target.id !== targetId));
+      }, 2200);
+    }, 950);
+    return () => {
+      clearInterval(timer);
+      clearInterval(spawner);
+    };
+  }, [running]);
+
+  const start = () => {
+    setRunning(true);
+    setScore(0);
+    setTimeLeft(20);
+    setTargets([]);
+  };
+
+  const shootWeb = (id: number) => {
+    initAudio();
+    playNote(720, 0.12, 'block');
+    setScore(prev => prev + 1);
+    setTargets(prev => prev.filter(target => target.id !== id));
+  };
+
+  return (
+    <div className="text-center">
+      <div className="flex justify-center gap-6 mb-4 text-lg font-bold">
+        <span className="text-cyan-300">🕸️ {score}</span>
+        <span className={timeLeft <= 5 && running ? 'text-yellow-300 animate-pulse' : 'text-white'}>⏱️ {timeLeft}s</span>
+      </div>
+      {!running && timeLeft === 20 ? (
+        <button onClick={start} className="px-6 py-3 rounded-full bg-gradient-to-r from-red-500 to-blue-500 font-bold hover:scale-105 transition">Start Web Shooter</button>
+      ) : !running && timeLeft === 0 ? (
+        <div>
+          <div className="text-2xl font-bold text-green-300 mb-2">City saved!</div>
+          <div className="text-white mb-4">You trapped {score} bad guys.</div>
+          <button onClick={start} className="px-6 py-3 rounded-full bg-gradient-to-r from-red-500 to-blue-500 font-bold hover:scale-105 transition">Play Again</button>
+        </div>
+      ) : (
+        <div className="relative h-72 rounded-3xl overflow-hidden border border-white/10 bg-gradient-to-b from-sky-500 via-blue-700 to-slate-900">
+          <div className="absolute inset-x-0 bottom-0 h-16 bg-[linear-gradient(90deg,rgba(255,255,255,0.2)_0_12px,transparent_12px_24px)] opacity-25" />
+          <div className="absolute inset-x-0 top-4 text-center text-white/70 text-sm">Tap the bad guys before they escape the skyline.</div>
+          {targets.map(target => (
+              <button
+              key={target.id}
+              onTouchStart={(e) => { e.preventDefault(); shootWeb(target.id); }}
+              onClick={() => shootWeb(target.id)}
+              className="absolute -translate-x-1/2 -translate-y-1/2 w-16 h-16 md:w-[72px] md:h-[72px] rounded-full bg-white/15 backdrop-blur flex items-center justify-center text-4xl shadow-xl transition-transform hover:scale-110 active:scale-95 touch-none"
+              style={{ left: `${target.x}%`, top: `${target.y}%`, touchAction: 'manipulation' }}
+            >
+              <span>{target.emoji}</span>
+            </button>
+          ))}
+          <div className="absolute bottom-3 left-1/2 -translate-x-1/2 text-5xl">🕷️</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ===== MONKEY BANANA GAME =====
+function MonkeyBananaGame() {
+  const [running, setRunning] = useState(false);
+  const [score, setScore] = useState(0);
+  const [misses, setMisses] = useState(0);
+  const [monkeyX, setMonkeyX] = useState(50);
+  const [bananas, setBananas] = useState<{ id: number; x: number; y: number; speed: number }[]>([]);
+  const monkeyXRef = useRef(50);
+  const idRef = useRef(0);
+  const arenaRef = useRef<HTMLDivElement>(null);
+
+  const moveMonkey = useCallback((percent: number) => {
+    const next = Math.max(8, Math.min(92, percent));
+    monkeyXRef.current = next;
+    setMonkeyX(next);
+  }, []);
+
+  useEffect(() => {
+    if (!running) return;
+    const dropper = setInterval(() => {
+      setBananas(prev => {
+        let caught = 0;
+        let dropped = 0;
+        const next = prev.flatMap(item => {
+          const nextY = item.y + item.speed;
+          if (nextY >= 82) {
+            if (Math.abs(item.x - monkeyXRef.current) <= 14) {
+              caught += 1;
+            } else {
+              dropped += 1;
+            }
+            return [];
+          }
+          return [{ ...item, y: nextY }];
+        });
+        if (caught) setScore(current => current + caught);
+        if (dropped) setMisses(current => current + dropped);
+        return next;
+      });
+    }, 90);
+    const spawner = setInterval(() => {
+      idRef.current += 1;
+      setBananas(prev => [...prev.slice(-7), { id: idRef.current, x: Math.random() * 78 + 8, y: 2, speed: Math.random() * 2.2 + 2.4 }]);
+    }, 1000);
+    return () => {
+      clearInterval(dropper);
+      clearInterval(spawner);
+    };
+  }, [running]);
+
+  useEffect(() => {
+    if (misses >= 5) {
+      setRunning(false);
+    }
+  }, [misses]);
+
+  const start = () => {
+    setRunning(true);
+    setScore(0);
+    setMisses(0);
+    setBananas([]);
+    moveMonkey(50);
+  };
+
+  const moveFromClientX = (clientX: number) => {
+    if (!arenaRef.current) return;
+    const rect = arenaRef.current.getBoundingClientRect();
+    moveMonkey(((clientX - rect.left) / rect.width) * 100);
+  };
+
+  return (
+    <div className="text-center">
+      <div className="flex justify-center gap-6 mb-4 text-lg font-bold">
+        <span className="text-yellow-300">🍌 {score}</span>
+        <span className={misses >= 3 ? 'text-red-300 animate-pulse' : 'text-white'}>💨 Misses {misses}/5</span>
+      </div>
+      {!running && score === 0 && misses === 0 ? (
+        <button onClick={start} className="px-6 py-3 rounded-full bg-gradient-to-r from-lime-400 to-yellow-400 text-black font-bold hover:scale-105 transition">Start Banana Catch</button>
+      ) : !running ? (
+        <div>
+          <div className="text-2xl font-bold text-green-300 mb-2">Monkey snack time finished!</div>
+          <div className="text-white mb-4">You caught {score} bananas.</div>
+          <button onClick={start} className="px-6 py-3 rounded-full bg-gradient-to-r from-lime-400 to-yellow-400 text-black font-bold hover:scale-105 transition">Play Again</button>
+        </div>
+      ) : (
+        <>
+          <div
+            ref={arenaRef}
+            className="relative h-72 rounded-3xl overflow-hidden border border-white/10 bg-gradient-to-b from-cyan-300 via-green-400 to-green-700 touch-none"
+            onMouseMove={(e) => moveFromClientX(e.clientX)}
+            onClick={(e) => moveFromClientX(e.clientX)}
+            onTouchStart={(e) => moveFromClientX(e.touches[0].clientX)}
+            onTouchMove={(e) => {
+              e.preventDefault();
+              moveFromClientX(e.touches[0].clientX);
+            }}
+          >
+            <div className="absolute inset-x-0 top-4 text-center text-black/70 text-sm font-medium">Move the monkey under the bananas.</div>
+            {bananas.map(item => (
+              <div key={item.id} className="absolute -translate-x-1/2 text-4xl" style={{ left: `${item.x}%`, top: `${item.y}%` }}>🍌</div>
+            ))}
+            <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-amber-900/50 to-transparent" />
+            <div className="absolute bottom-3 -translate-x-1/2 text-6xl transition-all duration-150" style={{ left: `${monkeyX}%` }}>🐵</div>
+          </div>
+          <div className="flex justify-center gap-3 mt-4">
+            <button onClick={() => moveMonkey(monkeyX - 10)} className="px-4 py-2 rounded-full bg-black/20 font-bold">⬅️</button>
+            <button onClick={() => moveMonkey(monkeyX + 10)} className="px-4 py-2 rounded-full bg-black/20 font-bold">➡️</button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -510,16 +793,34 @@ function StarCatchGame() {
 function DrawingCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [drawing, setDrawing] = useState(false);
-  const [color, setColor] = useState('#ff69b4');
+  const lastPoint = useRef<{ x: number; y: number } | null>(null);
+  const [color, setColor] = useState('#000000');
+  const [brushSize, setBrushSize] = useState(6);
+  const [tool, setTool] = useState<'brush' | 'eraser'>('brush');
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }, []);
 
   const getPos = (e: React.MouseEvent | React.TouchEvent) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
     if ('touches' in e) {
-      return { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
+      return {
+        x: ((e.touches[0].clientX - rect.left) / rect.width) * canvas.width,
+        y: ((e.touches[0].clientY - rect.top) / rect.height) * canvas.height,
+      };
     }
-    return { x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY };
+    return {
+      x: ((e.nativeEvent.clientX - rect.left) / rect.width) * canvas.width,
+      y: ((e.nativeEvent.clientY - rect.top) / rect.height) * canvas.height,
+    };
   };
 
   const start = (e: React.MouseEvent | React.TouchEvent) => {
@@ -528,8 +829,13 @@ function DrawingCanvas() {
     const ctx = canvasRef.current?.getContext('2d');
     if (ctx) {
       const pos = getPos(e);
+      ctx.strokeStyle = tool === 'eraser' ? '#ffffff' : color;
+      ctx.lineWidth = brushSize;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
       ctx.beginPath();
       ctx.moveTo(pos.x, pos.y);
+      lastPoint.current = pos;
     }
   };
 
@@ -539,27 +845,74 @@ function DrawingCanvas() {
     const ctx = canvasRef.current.getContext('2d');
     if (!ctx) return;
     const pos = getPos(e);
+    const from = lastPoint.current ?? pos;
+    ctx.beginPath();
+    ctx.moveTo(from.x, from.y);
     ctx.lineTo(pos.x, pos.y);
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 4;
+    ctx.strokeStyle = tool === 'eraser' ? '#ffffff' : color;
+    ctx.lineWidth = brushSize;
     ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
     ctx.stroke();
+    lastPoint.current = pos;
   };
 
   const end = (e?: React.MouseEvent | React.TouchEvent) => {
     if (e) e.preventDefault();
     setDrawing(false);
+    lastPoint.current = null;
   };
 
-  const clear = () => { const ctx = canvasRef.current?.getContext('2d'); if (ctx && canvasRef.current) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height); };
-  const colors = ['#ff69b4', '#ff0000', '#ff8c00', '#ffff00', '#00ff00', '#00bfff', '#8a2be2', '#ffffff'];
+  const clear = () => {
+    const ctx = canvasRef.current?.getContext('2d');
+    if (ctx && canvasRef.current) {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    }
+  };
+
+  const save = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const link = document.createElement('a');
+    link.download = 'jayden-drawing.png';
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+  };
+
+  const colors = ['#000000', '#ff69b4', '#ff3b30', '#ff9500', '#ffd60a', '#34c759', '#00c7be', '#0a84ff', '#8e44ad', '#6b4f2c'];
   return (
     <div className="text-center">
-      <div className="flex justify-center gap-2 mb-3">{colors.map(c => (<button key={c} onClick={() => setColor(c)} className={`w-8 h-8 rounded-full border-2 ${color === c ? 'border-white scale-110' : 'border-transparent'} transition`} style={{ backgroundColor: c }} />))}</div>
-      <canvas ref={canvasRef} width={300} height={250} className="bg-white rounded-2xl mx-auto cursor-crosshair touch-none"
+      <div className="flex flex-wrap justify-center gap-2 mb-4">
+        {colors.map(c => (
+          <button
+            key={c}
+            onClick={() => { setColor(c); setTool('brush'); }}
+            className={`w-9 h-9 rounded-full border-2 ${color === c && tool === 'brush' ? 'border-yellow-300 scale-110' : 'border-white/20'} transition`}
+            style={{ backgroundColor: c }}
+          />
+        ))}
+      </div>
+      <div className="flex flex-wrap justify-center gap-2 mb-4">
+        {[4, 8, 14].map(size => (
+          <button
+            key={size}
+            onClick={() => setBrushSize(size)}
+            className={`px-3 py-2 rounded-full font-bold ${brushSize === size ? 'bg-yellow-400 text-black' : 'bg-white/10 text-white'}`}
+          >
+            {size}px
+          </button>
+        ))}
+        <button onClick={() => setTool('brush')} className={`px-3 py-2 rounded-full font-bold ${tool === 'brush' ? 'bg-pink-500' : 'bg-white/10'}`}>🖌️ Brush</button>
+        <button onClick={() => setTool('eraser')} className={`px-3 py-2 rounded-full font-bold ${tool === 'eraser' ? 'bg-cyan-500 text-black' : 'bg-white/10'}`}>🧽 Eraser</button>
+      </div>
+      <canvas ref={canvasRef} width={340} height={260} className="bg-white rounded-2xl mx-auto cursor-crosshair touch-none w-full max-w-[340px] shadow-lg"
         onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end}
         onTouchStart={start} onTouchMove={move} onTouchEnd={end} />
-      <button onClick={clear} className="mt-3 px-6 py-2 bg-red-500 rounded-full text-white font-bold">🗑️ Clear</button>
+      <div className="mt-4 flex flex-wrap justify-center gap-3">
+        <button onClick={clear} className="px-5 py-2 bg-red-500 rounded-full text-white font-bold">🗑️ Clear</button>
+        <button onClick={save} className="px-5 py-2 bg-green-500 rounded-full text-white font-bold">💾 Save</button>
+      </div>
     </div>
   );
 }
@@ -692,25 +1045,24 @@ export default function Home() {
           <h2 className="text-4xl md:text-5xl font-bold text-center mb-4 bg-gradient-to-r from-pink-300 to-purple-400 bg-clip-text text-transparent">🎤 K-Pop Demon Hunters 🎤</h2>
           <p className="text-center text-purple-200 mb-12 text-lg">My favorite songs! (from the movie Hunties)</p>
           <div className="grid md:grid-cols-2 gap-8">
-            {[
-              { song: 'Soda Pop', desc: 'Catchy beats! 🎶', color: 'from-cyan-400 to-blue-500', icon: '🥤', melody: sodaPopMelody },
-              { song: 'Golden', desc: 'My favorite! ✨', color: 'from-yellow-400 to-amber-500', icon: '⭐', melody: goldenMelody },
-            ].map((item, i) => (
-              <TiltCard key={i}>
-                <div className={`p-8 rounded-3xl bg-gradient-to-br ${item.color} shadow-2xl relative overflow-hidden group cursor-pointer`}
-                     onClick={() => { initAudio(); playMelody(item.melody, 250, 'piano'); }}>
-                  <div className="text-6xl mb-4 text-center animate-bounce">{item.icon}</div>
-                  <h3 className="text-3xl font-bold text-center mb-2">{item.song}</h3>
-                  <p className="text-center text-sm opacity-70">{item.desc}</p>
-                  <p className="text-center text-xs mt-2 text-white/50">🎵 Click to play melody!</p>
-                  <div className="flex justify-center gap-2 mt-4">
-                    {['💃', '🕺', '🎵', '🎶', '✨'].map((e, j) => (
-                      <span key={j} className="text-2xl opacity-0 group-hover:opacity-100 group-hover:animate-bounce transition-all duration-300" style={{ animationDelay: `${j * 0.15}s`, transitionDelay: `${j * 0.1}s` }}>{e}</span>
-                    ))}
-                  </div>
-                </div>
-              </TiltCard>
-            ))}
+            {/* Soda Pop */}
+            <TiltCard>
+              <div className="p-6 rounded-3xl bg-gradient-to-br from-cyan-400 to-blue-500 shadow-2xl relative overflow-hidden">
+                <div className="text-6xl mb-4 text-center animate-bounce">🥤</div>
+                <h3 className="text-3xl font-bold text-center mb-1">Soda Pop</h3>
+                <p className="text-center text-sm opacity-70 mb-4">Catchy beats! 🎶</p>
+                <iframe style={{ borderRadius: '12px' }} src="https://open.spotify.com/embed/track/02sy7FAs8dkDNYsHp4Ul3f" width="100%" height="152" frameBorder={0} allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy" />
+              </div>
+            </TiltCard>
+            {/* Golden */}
+            <TiltCard>
+              <div className="p-6 rounded-3xl bg-gradient-to-br from-yellow-400 to-amber-500 shadow-2xl relative overflow-hidden">
+                <div className="text-6xl mb-4 text-center animate-bounce">⭐</div>
+                <h3 className="text-3xl font-bold text-center mb-1">Golden</h3>
+                <p className="text-center text-sm opacity-70 mb-4">My favorite! ✨</p>
+                <iframe style={{ borderRadius: '12px' }} src="https://open.spotify.com/embed/track/1CPZ5BxNNd0n0nF4Orb9JS" width="100%" height="152" frameBorder={0} allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy" />
+              </div>
+            </TiltCard>
           </div>
           <div className="flex justify-center gap-3 mt-8">
             <span className="px-4 py-2 bg-pink-500/30 rounded-full text-sm animate-pulse">🎧 Loves K-pop</span>
@@ -727,12 +1079,14 @@ export default function Home() {
           <div className="grid md:grid-cols-3 gap-6 mt-8">
             {[
               { icon: '🎵', name: 'Clarinet', desc: 'My jazzy friend!', status: 'Learning', color: 'from-blue-500 to-indigo-600', instrument: 'clarinet' as const, melody: [
-                { freq: 261.63, dur: 0.4 }, { freq: 293.66, dur: 0.3 }, { freq: 329.63, dur: 0.4 },
-                { freq: 349.23, dur: 0.3 }, { freq: 392.0, dur: 0.5 },
+                { freq: 261.63, dur: 0.32 }, { freq: 293.66, dur: 0.28 }, { freq: 329.63, dur: 0.34 }, { freq: 392.0, dur: 0.45 },
+                { freq: 349.23, dur: 0.3 }, { freq: 329.63, dur: 0.28 }, { freq: 293.66, dur: 0.3 }, { freq: 392.0, dur: 0.48 },
+                { freq: 440.0, dur: 0.36 }, { freq: 392.0, dur: 0.5 },
               ]},
               { icon: '🎶', name: 'Recorder', desc: 'My first instrument!', status: 'Playing', color: 'from-green-500 to-teal-600', instrument: 'recorder' as const, melody: [
-                { freq: 523.25, dur: 0.3 }, { freq: 493.88, dur: 0.3 }, { freq: 440.0, dur: 0.4 },
-                { freq: 392.0, dur: 0.3 }, { freq: 349.23, dur: 0.5 },
+                { freq: 523.25, dur: 0.28 }, { freq: 587.33, dur: 0.28 }, { freq: 659.25, dur: 0.34 }, { freq: 587.33, dur: 0.28 },
+                { freq: 523.25, dur: 0.28 }, { freq: 493.88, dur: 0.3 }, { freq: 440.0, dur: 0.34 }, { freq: 392.0, dur: 0.3 },
+                { freq: 349.23, dur: 0.5 },
               ]},
               { icon: '🎹', name: 'Piano', desc: '32 keys to play!', status: 'Practicing', color: 'from-purple-500 to-pink-600', isPiano: true, melody: [
                 { freq: 261.63, dur: 0.3 }, { freq: 329.63, dur: 0.3 }, { freq: 392.0, dur: 0.4 },
@@ -876,11 +1230,13 @@ export default function Home() {
 
       {/* MINI GAMES */}
       <RevealSection><section id="games" className="py-20 px-4">
-        <div className="max-w-4xl mx-auto">
+        <div className="max-w-6xl mx-auto">
           <h2 className="text-4xl md:text-5xl font-bold text-center mb-12 bg-gradient-to-r from-green-300 to-cyan-400 bg-clip-text text-transparent">🎮 Mini Games 🎮</h2>
-          <div className="grid md:grid-cols-2 gap-8">
+          <div className="grid lg:grid-cols-2 gap-8">
             <div className="bg-white/10 backdrop-blur rounded-3xl p-6"><h3 className="text-2xl font-bold text-center mb-4">🧠 Memory Match</h3><MemoryGame /></div>
             <div className="bg-white/10 backdrop-blur rounded-3xl p-6"><h3 className="text-2xl font-bold text-center mb-4">⭐ Catch the Stars</h3><StarCatchGame /></div>
+            <div className="bg-white/10 backdrop-blur rounded-3xl p-6"><h3 className="text-2xl font-bold text-center mb-4">🕷️ Spider-Man Web Shooter</h3><SpiderManWebGame playNote={playNote} initAudio={initAudio} /></div>
+            <div className="bg-white/10 backdrop-blur rounded-3xl p-6"><h3 className="text-2xl font-bold text-center mb-4">🐵 Monkey Banana Catch</h3><MonkeyBananaGame /></div>
           </div>
         </div>
       </section></RevealSection>
@@ -889,7 +1245,7 @@ export default function Home() {
       <RevealSection><section id="art" className="py-20 px-4 bg-gradient-to-b from-transparent via-pink-800/20 to-transparent">
         <div className="max-w-4xl mx-auto">
           <h2 className="text-4xl md:text-5xl font-bold text-center mb-12 bg-gradient-to-r from-pink-300 to-purple-400 bg-clip-text text-transparent">🎨 Draw Something! 🎨</h2>
-          <div className="max-w-md mx-auto bg-white/10 backdrop-blur rounded-3xl p-6">
+          <div className="max-w-xl mx-auto bg-white/10 backdrop-blur rounded-3xl p-6">
             <DrawingCanvas />
           </div>
         </div>
