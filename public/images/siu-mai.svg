@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Siu Mai wrapper (yellow wonton) -->
+  <ellipse cx="50" cy="60" rx="35" ry="28" fill="#F4D03F" stroke="#D4AC0D" stroke-width="2"/>
+  <!-- Ruffled top edge -->
+  <path d="M20 55 Q25 48 30 55 Q35 48 40 55 Q45 48 50 55 Q55 48 60 55 Q65 48 70 55 Q75 48 80 55" fill="none" stroke="#D4AC0D" stroke-width="2"/>
+  <!-- Filling peeking out (orange shrimp) -->
+  <ellipse cx="50" cy="52" rx="18" ry="10" fill="#E67E22"/>
+  <!-- Green pea on top -->
+  <circle cx="50" cy="45" r="5" fill="#27AE60"/>
+  <!-- Wrapper pleats lines -->
+  <line x1="25" y1="58" x2="35" y2="52" stroke="#D4AC0D" stroke-width="1" opacity="0.5"/>
+  <line x1="75" y1="58" x2="65" y2="52" stroke="#D4AC0D" stroke-width="1" opacity="0.5"/>
+  <!-- Steam -->
+  <path d="M40 30 Q38 22 42 18" fill="none" stroke="#ECF0F1" stroke-width="2" opacity="0.6"/>
+  <path d="M50 28 Q48 18 52 12" fill="none" stroke="#ECF0F1" stroke-width="2" opacity="0.6"/>
+  <path d="M60 30 Q58 22 62 18" fill="none" stroke="#ECF0F1" stroke-width="2" opacity="0.6"/>
+  <!-- Plate shadow -->
+  <ellipse cx="50" cy="88" rx="40" ry="6" fill="#BDC3C7" opacity="0.3"/>
+</svg>

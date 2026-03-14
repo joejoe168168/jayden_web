@@ -9,9 +9,23 @@ type SparkleData = { left: string; top: string; animationDelay: string };
 function useAudio() {
   const ctxRef = useRef<AudioContext | null>(null);
   const getCtx = useCallback(() => {
-    if (!ctxRef.current) ctxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    if (!ctxRef.current) {
+      ctxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
+    // iOS requires resume after user gesture
+    if (ctxRef.current.state === 'suspended') {
+      ctxRef.current.resume();
+    }
     return ctxRef.current;
   }, []);
+
+  // Call this on first user interaction for iOS
+  const initAudio = useCallback(() => {
+    try {
+      const ctx = getCtx();
+      if (ctx.state === 'suspended') ctx.resume();
+    } catch (e) {}
+  }, [getCtx]);
 
   // Realistic instrument synthesis
   const playNote = useCallback((freq: number, duration: number, instrument: 'piano' | 'clarinet' | 'recorder' | 'kick' | 'punch' | 'block' = 'piano') => {
@@ -130,7 +144,7 @@ function useAudio() {
     { freq: 523.25, dur: 0.3 }, { freq: 440.0, dur: 0.3 }, { freq: 523.25, dur: 0.4 },
   ];
 
-  return { playNote, playMelody, sodaPopMelody, goldenMelody };
+  return { playNote, playMelody, sodaPopMelody, goldenMelody, initAudio };
 }
 
 // ===== PIANO KEYBOARD (32 keys: C3 to C6) =====
@@ -386,17 +400,41 @@ function MemoryGame() {
 function StarCatchGame() {
   const [active, setActive] = useState(false);
   const [score, setScore] = useState(0);
+  const [timeLeft, setTimeLeft] = useState(30);
   const [stars, setStars] = useState<{ id: number; x: number; y: number }[]>([]);
+
   useEffect(() => {
     if (!active) return;
-    const iv = setInterval(() => { setStars(s => [...s.slice(-5), { id: Date.now(), x: Math.random() * 80 + 10, y: Math.random() * 70 + 10 }]); }, 600);
-    return () => clearInterval(iv);
+    // Timer countdown
+    const timer = setInterval(() => {
+      setTimeLeft(t => {
+        if (t <= 1) { setActive(false); return 0; }
+        return t - 1;
+      });
+    }, 1000);
+    // Spawn stars
+    const starSpawner = setInterval(() => {
+      setStars(s => [...s.slice(-5), { id: Date.now(), x: Math.random() * 80 + 10, y: Math.random() * 70 + 10 }]);
+    }, 600);
+    return () => { clearInterval(timer); clearInterval(starSpawner); };
   }, [active]);
+
+  const startGame = () => { setActive(true); setScore(0); setTimeLeft(30); setStars([]); };
+
   return (
     <div className="text-center">
-      <div className="mb-4 text-xl font-bold text-yellow-300">⭐ Score: {score}</div>
-      {!active ? (
-        <button onClick={() => { setActive(true); setScore(0); }} className="px-8 py-3 bg-gradient-to-r from-yellow-400 to-orange-500 rounded-full font-bold text-xl hover:scale-110 transition">⭐ Start Game!</button>
+      <div className="flex justify-center gap-6 mb-4">
+        <div className="text-xl font-bold text-yellow-300">⭐ {score}</div>
+        <div className={`text-xl font-bold ${timeLeft <= 5 ? 'text-red-400 animate-pulse' : 'text-white'}`}>⏱️ {timeLeft}s</div>
+      </div>
+      {!active && timeLeft === 30 ? (
+        <button onClick={startGame} className="px-8 py-3 bg-gradient-to-r from-yellow-400 to-orange-500 rounded-full font-bold text-xl hover:scale-110 transition">⭐ Start Game!</button>
+      ) : !active && timeLeft === 0 ? (
+        <div>
+          <div className="text-2xl font-bold text-green-400 mb-3">🎉 Time&apos;s Up!</div>
+          <div className="text-lg text-white mb-4">You caught {score} stars!</div>
+          <button onClick={startGame} className="px-8 py-3 bg-gradient-to-r from-yellow-400 to-orange-500 rounded-full font-bold text-xl hover:scale-110 transition">🔄 Play Again!</button>
+        </div>
       ) : (
         <div className="relative w-full h-64 bg-gradient-to-b from-indigo-900 to-purple-900 rounded-2xl overflow-hidden">
           {stars.map(s => (
@@ -405,7 +443,7 @@ function StarCatchGame() {
           ))}
         </div>
       )}
-      {active && <button onClick={() => setActive(false)} className="mt-3 px-6 py-2 bg-red-500 rounded-full text-white font-bold">Stop</button>}
+      {active && <button onClick={() => { setActive(false); setTimeLeft(30); }} className="mt-3 px-6 py-2 bg-red-500 rounded-full text-white font-bold">Stop</button>}
     </div>
   );
 }
@@ -415,19 +453,54 @@ function DrawingCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [drawing, setDrawing] = useState(false);
   const [color, setColor] = useState('#ff69b4');
-  const start = (e: React.MouseEvent) => { setDrawing(true); const ctx = canvasRef.current?.getContext('2d'); if (ctx) { ctx.beginPath(); ctx.moveTo(e.nativeEvent.offsetX, e.nativeEvent.offsetY); } };
-  const move = (e: React.MouseEvent) => {
-    if (!drawing || !canvasRef.current) return;
-    const ctx = canvasRef.current.getContext('2d'); if (!ctx) return;
-    ctx.lineTo(e.nativeEvent.offsetX, e.nativeEvent.offsetY); ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.stroke();
+
+  const getPos = (e: React.MouseEvent | React.TouchEvent) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    if ('touches' in e) {
+      return { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
+    }
+    return { x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY };
   };
-  const end = () => setDrawing(false);
+
+  const start = (e: React.MouseEvent | React.TouchEvent) => {
+    e.preventDefault();
+    setDrawing(true);
+    const ctx = canvasRef.current?.getContext('2d');
+    if (ctx) {
+      const pos = getPos(e);
+      ctx.beginPath();
+      ctx.moveTo(pos.x, pos.y);
+    }
+  };
+
+  const move = (e: React.MouseEvent | React.TouchEvent) => {
+    if (!drawing || !canvasRef.current) return;
+    e.preventDefault();
+    const ctx = canvasRef.current.getContext('2d');
+    if (!ctx) return;
+    const pos = getPos(e);
+    ctx.lineTo(pos.x, pos.y);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+  };
+
+  const end = (e?: React.MouseEvent | React.TouchEvent) => {
+    if (e) e.preventDefault();
+    setDrawing(false);
+  };
+
   const clear = () => { const ctx = canvasRef.current?.getContext('2d'); if (ctx && canvasRef.current) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height); };
   const colors = ['#ff69b4', '#ff0000', '#ff8c00', '#ffff00', '#00ff00', '#00bfff', '#8a2be2', '#ffffff'];
   return (
     <div className="text-center">
       <div className="flex justify-center gap-2 mb-3">{colors.map(c => (<button key={c} onClick={() => setColor(c)} className={`w-8 h-8 rounded-full border-2 ${color === c ? 'border-white scale-110' : 'border-transparent'} transition`} style={{ backgroundColor: c }} />))}</div>
-      <canvas ref={canvasRef} width={300} height={250} className="bg-white rounded-2xl mx-auto cursor-crosshair" onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end} />
+      <canvas ref={canvasRef} width={300} height={250} className="bg-white rounded-2xl mx-auto cursor-crosshair touch-none"
+        onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end}
+        onTouchStart={start} onTouchMove={move} onTouchEnd={end} />
       <button onClick={clear} className="mt-3 px-6 py-2 bg-red-500 rounded-full text-white font-bold">🗑️ Clear</button>
     </div>
   );
@@ -441,9 +514,10 @@ export default function Home() {
   const [pokeEffect, setPokeEffect] = useState<{ type: string; x: number; y: number } | null>(null);
   const sparkles = useSparkles(30);
   const sectionIds = ['hero', 'about', 'food', 'kpop', 'music', 'taekwondo', 'pokemon', 'artwork', 'spiderman', 'pikachu', 'games', 'art', 'dreams'];
-  const { playNote, playMelody, sodaPopMelody, goldenMelody } = useAudio();
+  const { playNote, playMelody, sodaPopMelody, goldenMelody, initAudio } = useAudio();
 
   const triggerPokeEffect = (type: string, e: React.MouseEvent) => {
+    initAudio(); // iOS audio init
     setPokeEffect({ type, x: e.clientX, y: e.clientY });
     const freqs: Record<string, number> = { Electric: 800, Fire: 300, Water: 600, Grass: 400, Normal: 500, Fairy: 900, 'Fire/Flying': 350, Psychic: 700 };
     playNote(freqs[type] || 500, 0.3, 'punch');
@@ -556,7 +630,7 @@ export default function Home() {
             ].map((item, i) => (
               <TiltCard key={i}>
                 <div className={`p-8 rounded-3xl bg-gradient-to-br ${item.color} shadow-2xl relative overflow-hidden group cursor-pointer`}
-                     onClick={() => playMelody(item.melody, 250, 'piano')}>
+                     onClick={() => { initAudio(); playMelody(item.melody, 250, 'piano'); }}>
                   <div className="text-6xl mb-4 text-center animate-bounce">{item.icon}</div>
                   <h3 className="text-3xl font-bold text-center mb-2">{item.song}</h3>
                   <p className="text-center text-sm opacity-70">{item.desc}</p>
@@ -599,7 +673,7 @@ export default function Home() {
             ].map((item, i) => (
               <TiltCard key={i}>
                 <div className={`p-6 rounded-3xl bg-gradient-to-br ${item.color} text-center shadow-xl cursor-pointer group`}
-                     onClick={() => (item as any).isPiano ? setShowPiano(true) : playMelody(item.melody, 220, item.instrument)}>
+                     onClick={() => { initAudio(); (item as any).isPiano ? setShowPiano(true) : playMelody(item.melody, 220, item.instrument); }}>
                   <div className="text-6xl mb-4">{item.icon}</div>
                   <h3 className="text-2xl font-bold mb-2">{item.name}</h3>
                   <p className="text-white/80 mb-3">{item.desc}</p>
@@ -640,7 +714,7 @@ export default function Home() {
             ].map((item, i) => (
               <TiltCard key={i}>
                 <div className="p-6 rounded-3xl bg-gradient-to-br from-red-600 to-orange-700 text-center shadow-lg cursor-pointer hover:scale-105 transition"
-                     onClick={() => playNote(100, 0.3, item.sound)}>
+                     onClick={() => { initAudio(); playNote(100, 0.3, item.sound); }}>
                   <div className="text-5xl mb-3">{item.icon}</div>
                   <h3 className="text-xl font-bold">{item.move}</h3>
                   <p className="text-white/80">{item.desc}</p>
@@ -688,14 +762,14 @@ export default function Home() {
       <RevealSection><section id="artwork" className="py-20 px-4 bg-gradient-to-b from-transparent via-orange-800/20 to-transparent">
         <div className="max-w-4xl mx-auto text-center">
           <h2 className="text-4xl md:text-5xl font-bold mb-4 bg-gradient-to-r from-orange-300 to-yellow-400 bg-clip-text text-transparent">🐟 小金魚逃走了 🐟</h2>
-          <p className="text-orange-200 mb-8 text-lg">Jayden&apos;s awesome space art! Click to play the game!</p>
+          <p className="text-orange-200 mb-8 text-lg">Jayden&apos;s awesome space art! Click to listen to the story!</p>
           <div className="max-w-md mx-auto">
             <a href="https://www.hkcot.com/goldfish/" target="_blank" rel="noopener noreferrer"
                className="block rounded-3xl shadow-2xl hover:scale-105 transition-all duration-300 group overflow-hidden">
               <div className="relative">
                 <Image src="/images/goldfish-artwork.jpg" alt="Jayden's Space Art" width={400} height={400} className="w-full h-auto" />
                 <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-center pb-6">
-                  <span className="text-white text-xl font-bold">🐟 Click to find the goldfish!</span>
+                  <span className="text-white text-xl font-bold">🎧 Click to listen to the story!</span>
                 </div>
               </div>
             </a>
