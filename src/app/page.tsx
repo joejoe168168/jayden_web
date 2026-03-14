@@ -688,16 +688,16 @@ export default function Home() {
       <RevealSection><section id="artwork" className="py-20 px-4 bg-gradient-to-b from-transparent via-orange-800/20 to-transparent">
         <div className="max-w-4xl mx-auto text-center">
           <h2 className="text-4xl md:text-5xl font-bold mb-4 bg-gradient-to-r from-orange-300 to-yellow-400 bg-clip-text text-transparent">🐟 小金魚逃走了 🐟</h2>
-          <p className="text-orange-200 mb-8 text-lg">Click the picture to play!</p>
+          <p className="text-orange-200 mb-8 text-lg">Jayden&apos;s awesome space art! Click to play the game!</p>
           <div className="max-w-md mx-auto">
             <a href="https://www.hkcot.com/goldfish/" target="_blank" rel="noopener noreferrer"
-               className="block p-8 bg-gradient-to-br from-orange-400 to-yellow-500 rounded-3xl shadow-2xl hover:scale-105 transition-all duration-300 group">
-              <div className="bg-white/20 rounded-2xl p-12 mb-4">
-                <div className="text-8xl group-hover:animate-bounce">🐟</div>
+               className="block rounded-3xl shadow-2xl hover:scale-105 transition-all duration-300 group overflow-hidden">
+              <div className="relative">
+                <Image src="/images/goldfish-artwork.jpg" alt="Jayden's Space Art" width={400} height={400} className="w-full h-auto" />
+                <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-center pb-6">
+                  <span className="text-white text-xl font-bold">🐟 Click to find the goldfish!</span>
+                </div>
               </div>
-              <h3 className="text-2xl font-bold text-white mb-2">小金魚逃走了</h3>
-              <p className="text-white/80 text-sm">Click to find the goldfish!</p>
-              <p className="text-white/50 text-xs mt-2">(Artwork coming soon)</p>
             </a>
           </div>
         </div>
