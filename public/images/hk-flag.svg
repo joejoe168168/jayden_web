@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 40" width="60" height="40">
+  <rect width="60" height="40" fill="#DE2910"/>
+  <g transform="translate(30,20)">
+    <!-- Bauhinia flower -->
+    <g fill="#FFF">
+      <!-- 5 petals -->
+      <path d="M0,-10 Q3,-6 0,-2 Q-3,-6 0,-10" transform="rotate(0)">
+        <animateTransform attributeName="transform" type="rotate" values="0;3;0;-3;0" dur="4s" repeatCount="indefinite"/>
+      </path>
+      <path d="M0,-10 Q3,-6 0,-2 Q-3,-6 0,-10" transform="rotate(72)">
+        <animateTransform attributeName="transform" type="rotate" values="72;75;72;69;72" dur="4s" repeatCount="indefinite"/>
+      </path>
+      <path d="M0,-10 Q3,-6 0,-2 Q-3,-6 0,-10" transform="rotate(144)">
+        <animateTransform attributeName="transform" type="rotate" values="144;147;144;141;144" dur="4s" repeatCount="indefinite"/>
+      </path>
+      <path d="M0,-10 Q3,-6 0,-2 Q-3,-6 0,-10" transform="rotate(216)">
+        <animateTransform attributeName="transform" type="rotate" values="216;219;216;213;216" dur="4s" repeatCount="indefinite"/>
+      </path>
+      <path d="M0,-10 Q3,-6 0,-2 Q-3,-6 0,-10" transform="rotate(288)">
+        <animateTransform attributeName="transform" type="rotate" values="288;291;288;285;288" dur="4s" repeatCount="indefinite"/>
+      </path>
+      <!-- Star in each petal -->
+      <circle cx="0" cy="-7" r="1" fill="#DE2910" transform="rotate(0)"/>
+      <circle cx="0" cy="-7" r="1" fill="#DE2910" transform="rotate(72)"/>
+      <circle cx="0" cy="-7" r="1" fill="#DE2910" transform="rotate(144)"/>
+      <circle cx="0" cy="-7" r="1" fill="#DE2910" transform="rotate(216)"/>
+      <circle cx="0" cy="-7" r="1" fill="#DE2910" transform="rotate(288)"/>
+    </g>
+  </g>
+</svg>
