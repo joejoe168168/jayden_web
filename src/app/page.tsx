@@ -37,6 +37,8 @@ function useAudio() {
   const playNote = useCallback((freq: number, duration: number, instrument: 'piano' | 'clarinet' | 'recorder' | 'kick' | 'punch' | 'block' = 'piano') => {
     try {
       const ctx = getCtx();
+      // iOS: resume if suspended (can happen after lock screen / tab switch)
+      if (ctx.state === 'suspended') { ctx.resume(); }
       const now = ctx.currentTime;
       
       if (instrument === 'piano') {
@@ -153,73 +155,102 @@ function useAudio() {
   return { playNote, playMelody, sodaPopMelody, goldenMelody, initAudio };
 }
 
-// ===== PIANO KEYBOARD (iPhone: 8 keys, Desktop: 32 keys) =====
-function PianoKeyboard({ onClose, playNote }: { onClose: () => void; playNote: (f: number, d: number, inst?: any) => void }) {
+// ===== PIANO KEYBOARD (iPhone: 1 octave white keys, Desktop: 3 octaves) =====
+function PianoKeyboard({ onClose, playNote, initAudio }: { onClose: () => void; playNote: (f: number, d: number, inst?: any) => void; initAudio: () => void }) {
   const [isPhone, setIsPhone] = useState(false);
   useEffect(() => {
     setIsPhone(/iPhone|iPod|Android.*Mobile/i.test(navigator.userAgent));
   }, []);
 
+  // All notes in order (semitones from C)
+  const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
   const generateKeys = () => {
-    const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
     if (isPhone) {
-      // iPhone: 8 keys C4-C5
-      const keys = [];
-      for (let i = 0; i < 8; i++) {
-        const note = noteNames[i];
-        const freq = 261.63 * Math.pow(2, i / 12);
-        keys.push({ note: `${note}4`, freq, white: !note.includes('#') });
-      }
-      return keys;
+      // iPhone: 1 octave white keys only (C4-C5) = 8 white keys, very playable
+      const whiteNotes = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
+      const semitones:  Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+      return whiteNotes.map(n => ({
+        note: `${n}4`,
+        freq: 261.63 * Math.pow(2, semitones[n] / 12),
+        white: true,
+        black: false,
+      }));
     }
-    // Desktop: 32 keys C3-C6
-    const keys = [];
+    // Desktop: C3 → C6 full (white + black)
+    const keys: { note: string; freq: number; white: boolean; black: boolean }[] = [];
     for (let octave = 3; octave <= 6; octave++) {
       for (let i = 0; i < noteNames.length; i++) {
+        if (octave === 6 && i > 0) break; // stop at C6
         const note = noteNames[i];
-        const freq = 130.81 * Math.pow(2, (octave - 3) + i / 12);
-        keys.push({ note: `${note}${octave}`, freq, white: !note.includes('#') });
+        const freq = 130.81 * Math.pow(2, (octave - 3) * 12 / 12 + i / 12);
+        keys.push({ note: `${note}${octave}`, freq, white: !note.includes('#'), black: note.includes('#') });
       }
     }
-    return keys.slice(0, 37);
+    return keys;
   };
 
-  const keys = generateKeys();
-  const whiteKeys = keys.filter(k => k.white);
-  const blackKeys = keys.filter(k => !k.white);
-  const keyWidth = isPhone ? 48 : 42;
+  const allKeys = generateKeys();
+  const whiteKeys = allKeys.filter(k => k.white);
+  const blackKeys = allKeys.filter(k => k.black);
+  const keyWidth = isPhone ? 42 : 38;
 
+  // Black key left offset: position relative to white key index
   const getBlackKeyLeft = (note: string) => {
-    const noteBase = note.replace(/\d/, '');
-    const octave = parseInt(note.match(/\d/)?.[0] || '4');
-    const positions: Record<string, number> = { 'C#': 0.7, 'D#': 1.7, 'F#': 3.7, 'G#': 4.7, 'A#': 5.7 };
-    const octaveOffset = (octave - 3) * 7;
-    return (positions[noteBase] || 0) + octaveOffset;
+    const noteBase = note.replace(/\d+/, '');
+    const octave = parseInt(note.match(/\d+/)?.[0] || '4');
+    // semitone offsets within octave → white key index offset
+    const blackOffsets: Record<string, number> = { 'C#': 0.65, 'D#': 1.65, 'F#': 3.65, 'G#': 4.65, 'A#': 5.65 };
+    const octaveWhiteCount = 7;
+    const octaveOffset = (octave - 3) * octaveWhiteCount;
+    return (blackOffsets[noteBase] ?? 0) + octaveOffset;
   };
+
+  const handleWhiteKey = (freq: number) => {
+    initAudio();
+    playNote(freq, 0.6, 'piano');
+  };
+  const handleBlackKey = (freq: number) => {
+    initAudio();
+    playNote(freq, 0.5, 'piano');
+  };
+
+  const totalWhiteKeys = whiteKeys.length;
+  const pianoWidth = totalWhiteKeys * (keyWidth + 2);
 
   return (
-    <div className="fixed inset-0 z-[9000] flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-gradient-to-b from-gray-900 via-gray-800 to-gray-900 rounded-3xl p-4 shadow-2xl max-w-full overflow-x-auto" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[9000] flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-gradient-to-b from-gray-900 via-gray-800 to-gray-900 rounded-t-3xl sm:rounded-3xl p-4 pb-8 sm:pb-4 shadow-2xl w-full sm:w-auto" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-3">
           <h3 className="text-xl font-bold text-white">🎹 Piano</h3>
           <button onClick={onClose} className="text-white/60 hover:text-white text-2xl px-3">✕</button>
         </div>
-        <div className="relative flex" style={{ minWidth: isPhone ? '400px' : '800px' }}>
-          {whiteKeys.map((k) => (
-            <button key={k.note}
-              onTouchStart={(e) => { e.preventDefault(); playNote(k.freq, 0.6, 'piano'); }}
-              onMouseDown={() => playNote(k.freq, 0.6, 'piano')}
-              className={`${isPhone ? 'w-12 h-36' : 'w-10 h-44'} bg-gradient-to-b from-white via-gray-50 to-gray-200 border border-gray-300 mx-[1px] rounded-b-lg hover:from-yellow-100 hover:to-yellow-300 active:scale-95 active:bg-yellow-200 transition-all shadow-md`} />
-          ))}
-          {blackKeys.map((k) => (
-            <button key={k.note}
-              onTouchStart={(e) => { e.preventDefault(); playNote(k.freq, 0.5, 'piano'); }}
-              onMouseDown={() => playNote(k.freq, 0.5, 'piano')}
-              className={`absolute ${isPhone ? 'w-8 h-24' : 'w-7 h-28'} bg-gradient-to-b from-gray-700 to-black rounded-b-lg hover:from-purple-700 hover:to-purple-900 active:scale-95 transition-all shadow-lg z-10`}
-              style={{ left: `${getBlackKeyLeft(k.note) * keyWidth}px` }} />
-          ))}
+        {/* Scrollable piano keys */}
+        <div className="overflow-x-auto">
+          <div className="relative flex" style={{ width: `${pianoWidth}px`, minWidth: `${pianoWidth}px` }}>
+            {whiteKeys.map((k) => (
+              <button key={k.note}
+                onTouchStart={(e) => { e.preventDefault(); handleWhiteKey(k.freq); }}
+                onMouseDown={() => handleWhiteKey(k.freq)}
+                className={`bg-gradient-to-b from-white via-gray-50 to-gray-200 border border-gray-300 mx-[1px] rounded-b-lg active:from-yellow-200 active:to-yellow-400 active:scale-95 transition-all shadow-md flex-shrink-0`}
+                style={{ width: `${keyWidth}px`, height: isPhone ? '160px' : '180px' }}
+              />
+            ))}
+            {blackKeys.map((k) => (
+              <button key={k.note}
+                onTouchStart={(e) => { e.preventDefault(); handleBlackKey(k.freq); }}
+                onMouseDown={() => handleBlackKey(k.freq)}
+                className={`absolute bg-gradient-to-b from-gray-700 to-black rounded-b-lg active:from-purple-700 active:to-purple-900 active:scale-95 transition-all shadow-lg z-10`}
+                style={{
+                  width: `${Math.round(keyWidth * 0.62)}px`,
+                  height: isPhone ? '100px' : '110px',
+                  left: `${getBlackKeyLeft(k.note) * (keyWidth + 2)}px`,
+                }}
+              />
+            ))}
+          </div>
         </div>
-        <p className="text-white/40 text-center mt-3 text-sm">{isPhone ? '8 keys' : '3 octaves: C3 → C6'} 🎵</p>
+        <p className="text-white/40 text-center mt-3 text-sm">{isPhone ? '7 white keys · C4–B4' : '3 octaves: C3 → C6'} 🎵</p>
       </div>
     </div>
   );
@@ -888,7 +919,7 @@ export default function Home() {
       </footer>
 
       {/* PIANO POPUP */}
-      {showPiano && <PianoKeyboard onClose={() => setShowPiano(false)} playNote={playNote} />}
+      {showPiano && <PianoKeyboard onClose={() => setShowPiano(false)} playNote={playNote} initAudio={initAudio} />}
 
       {/* POKEMON EFFECT */}
       {pokeEffect && <PokemonEffect type={pokeEffect.type} x={pokeEffect.x} y={pokeEffect.y} onDone={() => setPokeEffect(null)} />}
