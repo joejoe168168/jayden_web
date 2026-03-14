@@ -6,39 +6,44 @@ import Image from 'next/image';
 type SparkleData = { left: string; top: string; animationDelay: string };
 
 // ===== AUDIO ENGINE (Web Audio API - iOS compatible) =====
+// iOS Safari rule: AudioContext MUST be created/resumed inside a direct user gesture.
+// Strategy: keep one context, unlock it on first gesture, resume on every call.
 function useAudio() {
   const ctxRef = useRef<AudioContext | null>(null);
-  const warmed = useRef(false);
+  const unlockedRef = useRef(false);
 
-  const getCtx = useCallback(() => {
-    if (!ctxRef.current) {
-      ctxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-    }
-    return ctxRef.current;
-  }, []);
-
-  // iOS fix: warm up AudioContext by playing silent buffer on first touch
+  // Must be called synchronously inside a touch/click handler
   const initAudio = useCallback(() => {
-    if (warmed.current) return;
     try {
-      const ctx = getCtx();
-      if (ctx.state === 'suspended') ctx.resume();
-      // Play silent buffer to warm up iOS audio
-      const buffer = ctx.createBuffer(1, 1, 22050);
-      const source = ctx.createBufferSource();
-      source.buffer = buffer;
-      source.connect(ctx.destination);
-      source.start(0);
-      warmed.current = true;
-    } catch (e) {}
-  }, [getCtx]);
+      const AC = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AC) return;
+      if (!ctxRef.current) {
+        ctxRef.current = new AC();
+      }
+      const ctx = ctxRef.current;
+      // Unlock: resume + play a zero-gain buffer synchronously inside the gesture
+      if (!unlockedRef.current || ctx.state === 'suspended' || ctx.state === 'interrupted') {
+        ctx.resume();
+        const buf = ctx.createBuffer(1, 1, ctx.sampleRate);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        const g = ctx.createGain();
+        g.gain.value = 0.001; // near-silent
+        src.connect(g).connect(ctx.destination);
+        src.start(0);
+        unlockedRef.current = true;
+      }
+    } catch (_e) {}
+  }, []);
 
   // Realistic instrument synthesis
   const playNote = useCallback((freq: number, duration: number, instrument: 'piano' | 'clarinet' | 'recorder' | 'kick' | 'punch' | 'block' = 'piano') => {
     try {
-      const ctx = getCtx();
-      // iOS: resume if suspended (can happen after lock screen / tab switch)
-      if (ctx.state === 'suspended') { ctx.resume(); }
+      // Ensure context exists; create inside this call if needed (iOS gesture path)
+      const AC = window.AudioContext || (window as any).webkitAudioContext;
+      if (!ctxRef.current) ctxRef.current = new AC();
+      const ctx = ctxRef.current;
+      if (ctx.state !== 'running') ctx.resume();
       const now = ctx.currentTime;
       
       if (instrument === 'piano') {
@@ -126,7 +131,7 @@ function useAudio() {
         osc.start(now); osc.stop(now + 0.08);
       }
     } catch (e) { /* silent fail */ }
-  }, [getCtx]);
+  }, []);
 
   // Play melody with instrument
   const playMelody = useCallback((notes: { freq: number; dur: number }[], tempo: number = 200, instrument: 'piano' | 'clarinet' | 'recorder' = 'piano') => {
