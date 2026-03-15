@@ -15,7 +15,7 @@ type MusicCard = {
   desc: string;
   status: string;
   color: string;
-  samplePath: string;
+  trackPath: string;
   isPiano?: boolean;
 };
 
@@ -42,7 +42,7 @@ const MUSIC_CARDS: MusicCard[] = [
     desc: 'My jazzy friend!',
     status: 'Learning',
     color: 'from-blue-500 to-indigo-600',
-    samplePath: '/sounds/clarinet-note.mp3',
+    trackPath: '/sounds/clarinet-piece.mp3',
   },
   {
     icon: '🎶',
@@ -50,7 +50,7 @@ const MUSIC_CARDS: MusicCard[] = [
     desc: 'My first instrument!',
     status: 'Playing',
     color: 'from-green-500 to-teal-600',
-    samplePath: '/sounds/recorder-note.mp3',
+    trackPath: '/sounds/recorder-piece.mp3',
   },
   {
     icon: '🎹',
@@ -58,7 +58,7 @@ const MUSIC_CARDS: MusicCard[] = [
     desc: '32 keys to play!',
     status: 'Practicing',
     color: 'from-purple-500 to-pink-600',
-    samplePath: '/sounds/piano-note.mp3',
+    trackPath: '/sounds/piano-piece.mp3',
     isPiano: true,
   },
 ];
@@ -156,21 +156,24 @@ function useAudio() {
   const unlockedRef = useRef(false);
   const noiseBufferRef = useRef<AudioBuffer | null>(null);
   const clipRequestIdRef = useRef(0);
+  const mediaTemplateRef = useRef<Record<string, HTMLAudioElement>>({});
   // Sample cache: keyed by instrument name
   const sampleCacheRef = useRef<Record<string, AudioBuffer>>({});
   const sampleLoadingRef = useRef<Record<string, Promise<AudioBuffer | null>>>({});
   // Track active sources to stop them on demand
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const activeOscillatorsRef = useRef<OscillatorNode[]>([]);
+  const activeMediaRef = useRef<HTMLAudioElement[]>([]);
+  const mediaTimersRef = useRef<number[]>([]);
 
   const loadSample = useCallback(async (instrument: string, ctx: AudioContext): Promise<AudioBuffer | null> => {
     if (sampleCacheRef.current[instrument]) return sampleCacheRef.current[instrument];
     const inflight = sampleLoadingRef.current[instrument];
     if (inflight) return inflight;
     const urls: Record<string, string> = {
-      piano: '/sounds/piano-note.mp3',
-      clarinet: '/sounds/clarinet-note.mp3',
-      recorder: '/sounds/recorder-note.mp3',
+      piano: '/sounds/piano-piece.mp3',
+      clarinet: '/sounds/clarinet-piece.mp3',
+      recorder: '/sounds/recorder-piece.mp3',
       kick: '/sounds/kick.mp3',
       punch: '/sounds/punch.mp3',
       block: '/sounds/block.mp3',
@@ -254,6 +257,15 @@ function useAudio() {
       try { osc.stop(); } catch {}
     });
     activeOscillatorsRef.current = [];
+    activeMediaRef.current.forEach(audio => {
+      try {
+        audio.pause();
+        audio.currentTime = 0;
+      } catch {}
+    });
+    activeMediaRef.current = [];
+    mediaTimersRef.current.forEach(timer => window.clearTimeout(timer));
+    mediaTimersRef.current = [];
   }, []);
 
   // Stop all currently playing sounds and invalidate pending async clip starts.
@@ -261,6 +273,61 @@ function useAudio() {
     clipRequestIdRef.current += 1;
     stopActiveSounds();
   }, [stopActiveSounds]);
+
+  const getMediaTemplate = useCallback((url: string) => {
+    if (!mediaTemplateRef.current[url]) {
+      const audio = new window.Audio(url);
+      audio.preload = 'auto';
+      mediaTemplateRef.current[url] = audio;
+    }
+    return mediaTemplateRef.current[url];
+  }, []);
+
+  const playMediaClip = useCallback((url: string, maxDuration?: number, requestId?: number) => {
+    const template = getMediaTemplate(url);
+    template.load();
+    const audio = template.cloneNode() as HTMLAudioElement;
+    audio.src = url;
+    audio.preload = 'auto';
+    audio.volume = 0.9;
+
+    return new Promise<boolean>((resolve, reject) => {
+      const cleanup = () => {
+        activeMediaRef.current = activeMediaRef.current.filter(activeAudio => activeAudio !== audio);
+      };
+
+      audio.onended = () => {
+        cleanup();
+        resolve(true);
+      };
+
+      activeMediaRef.current.push(audio);
+      const stopTimer = maxDuration === undefined ? null : window.setTimeout(() => {
+        try {
+          audio.pause();
+          audio.currentTime = 0;
+        } catch {}
+        cleanup();
+        resolve(true);
+      }, maxDuration * 1000);
+      if (stopTimer !== null) {
+        mediaTimersRef.current.push(stopTimer);
+      }
+
+      audio.play().catch((error) => {
+        if (stopTimer !== null) {
+          window.clearTimeout(stopTimer);
+          mediaTimersRef.current = mediaTimersRef.current.filter(timer => timer !== stopTimer);
+        }
+        cleanup();
+        if (requestId === undefined || clipRequestIdRef.current === requestId) {
+          reject(error);
+          return;
+        }
+        resolve(false);
+      });
+    });
+  }, [getMediaTemplate]);
 
   const playSynthNote = useCallback((ctx: AudioContext, freq: number, duration: number, instrument: 'piano' | 'clarinet' | 'recorder') => {
     const now = ctx.currentTime + 0.01;
@@ -416,34 +483,22 @@ function useAudio() {
         return;
       }
       if (isCombat) {
-        loadSample(instrument, ctx).then(buf => {
-          if (!buf) {
-            playPercussionFallback(ctx, instrument, duration);
-            return;
-          }
-          const now = ctx.currentTime + 0.01;
-          const src = ctx.createBufferSource();
-          src.buffer = buf;
-          const gainNode = ctx.createGain();
-          const clipDuration = Math.min(buf.duration, Math.max(duration + 0.4, 0.7));
-          gainNode.gain.setValueAtTime(0.9, now);
-          gainNode.gain.setValueAtTime(0.9, now + Math.max(clipDuration - 0.15, 0.2));
-          gainNode.gain.exponentialRampToValueAtTime(0.0001, now + clipDuration);
-          src.connect(gainNode).connect(ctx.destination);
-          src.start(now);
-          src.stop(now + clipDuration);
-          activeSourcesRef.current.push(src);
-          src.onended = () => {
-            activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== src);
-          };
-        }).catch(() => {});
+        const urls: Record<'kick' | 'punch' | 'block', string> = {
+          kick: '/sounds/kick.mp3',
+          punch: '/sounds/punch.mp3',
+          block: '/sounds/block.mp3',
+        };
+        const clipDuration = Math.max(duration + 0.4, 0.7);
+        playMediaClip(urls[instrument], clipDuration).catch(() => {
+          playPercussionFallback(ctx, instrument, duration);
+        });
         return;
       }
     } catch { /* silent fail */ }
-  }, [getAudioContext, loadSample, playPercussionFallback, playSynthNote]);
+  }, [getAudioContext, playMediaClip, playPercussionFallback, playSynthNote]);
 
   // Play a sound clip from a URL path (max duration in seconds, default 5)
-  const playSoundClip = useCallback((url: string, maxDuration: number = 5) => {
+  const playSoundClip = useCallback((url: string, maxDuration?: number) => {
     try {
       const ctx = getAudioContext();
       if (!ctx) return;
@@ -453,24 +508,26 @@ function useAudio() {
       const requestId = clipRequestIdRef.current + 1;
       clipRequestIdRef.current = requestId;
       stopActiveSounds();
-      loadSample(url, ctx).then(buf => {
-        if (!buf || clipRequestIdRef.current !== requestId) return;
-        const now = ctx.currentTime + 0.01;
-        const dur = Math.min(maxDuration, buf.duration);
-        const src = ctx.createBufferSource();
-        src.buffer = buf;
-        const gainNode = ctx.createGain();
-        gainNode.gain.setValueAtTime(0.9, now);
-        gainNode.gain.setValueAtTime(0.9, now + dur - 0.3);
-        gainNode.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-        src.connect(gainNode).connect(ctx.destination);
-        src.start(now);
-        src.stop(now + dur);
-        activeSourcesRef.current.push(src);
-        src.onended = () => { activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== src); };
-      }).catch(() => {});
+      playMediaClip(url, maxDuration, requestId).catch(() => {
+        loadSample(url, ctx).then(buf => {
+          if (!buf || clipRequestIdRef.current !== requestId) return;
+          const now = ctx.currentTime + 0.01;
+          const dur = maxDuration === undefined ? buf.duration : Math.min(maxDuration, buf.duration);
+          const src = ctx.createBufferSource();
+          src.buffer = buf;
+          const gainNode = ctx.createGain();
+          gainNode.gain.setValueAtTime(0.9, now);
+          gainNode.gain.setValueAtTime(0.9, now + Math.max(dur - 0.3, 0.1));
+          gainNode.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+          src.connect(gainNode).connect(ctx.destination);
+          src.start(now);
+          src.stop(now + dur);
+          activeSourcesRef.current.push(src);
+          src.onended = () => { activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== src); };
+        }).catch(() => {});
+      });
     } catch {}
-  }, [getAudioContext, loadSample, stopActiveSounds]);
+  }, [getAudioContext, loadSample, playMediaClip, stopActiveSounds]);
 
   return { playNote, playSoundClip, initAudio, stopAllSounds };
 }
@@ -1023,21 +1080,21 @@ export default function Home() {
       <RevealSection><section id="music" className="py-20 px-4 bg-gradient-to-b from-transparent via-purple-800/30 to-transparent">
         <div className="max-w-4xl mx-auto">
           <h2 className="text-4xl md:text-5xl font-bold text-center mb-4 bg-gradient-to-r from-cyan-300 to-purple-400 bg-clip-text text-transparent">🎵 My Musical Adventure 🎵</h2>
-          <p className="text-center text-purple-200 mb-12 text-lg">Click to hear the real instrument samples and open the piano!</p>
+          <p className="text-center text-purple-200 mb-12 text-lg">Click to hear each full music piece and open the piano!</p>
           <div className="grid md:grid-cols-3 gap-6 mt-8">
             {MUSIC_CARDS.map((item, i) => (
               <TiltCard key={i}>
                 <div className={`p-6 rounded-3xl bg-gradient-to-br ${item.color} text-center shadow-xl group`}>
                   <button
                     type="button"
-                    onClick={() => { initAudio(); stopAllSounds(); playSoundClip(item.samplePath, item.isPiano ? 2.2 : 1.8); }}
+                    onClick={() => { initAudio(); stopAllSounds(); playSoundClip(item.trackPath); }}
                     className="w-full cursor-pointer"
                   >
                     <div className="text-6xl mb-4">{item.icon}</div>
                     <h3 className="text-2xl font-bold mb-2">{item.name}</h3>
                     <p className="text-white/80 mb-3">{item.desc}</p>
                     <span className="px-4 py-1 bg-white/20 rounded-full text-sm">{item.status}</span>
-                    <p className="text-xs mt-2 text-white/50">🎵 Click to hear the real sample!</p>
+                    <p className="text-xs mt-2 text-white/50">🎵 Click to hear the full music piece!</p>
                   </button>
                   {item.isPiano && (
                     <button
