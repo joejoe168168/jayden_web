@@ -13,19 +13,6 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <head>
-        <script dangerouslySetInnerHTML={{ __html: `
-          try {
-            if (typeof window !== 'undefined' && !window.ethereum) {
-              Object.defineProperty(window, 'ethereum', {
-                value: {},
-                writable: true,
-                configurable: true,
-              });
-            }
-          } catch (e) {}
-        ` }} />
-      </head>
       <body
         className="font-sans antialiased"
         style={{ fontFamily: '"Trebuchet MS", "Avenir Next", "Segoe UI", system-ui, sans-serif' }}
