@@ -19,9 +19,13 @@ function useAudio() {
   // Sample cache: keyed by instrument name
   const sampleCacheRef = useRef<Record<string, AudioBuffer>>({});
   const sampleLoadingRef = useRef<Record<string, Promise<AudioBuffer | null>>>({});
+  // Track active sources to stop them on demand
+  const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const activeOscillatorsRef = useRef<OscillatorNode[]>([]);
+  const melodyTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   // Base frequencies of each sample (the root pitch recorded in the MP3)
-  const SAMPLE_BASE: Record<string, number> = { piano: 261.63, clarinet: 261.63, recorder: 261.63 };
+  const SAMPLE_BASE: Record<string, number> = { piano: 261.63, clarinet: 261.63, recorder: 261.63, kick: 0, punch: 0, block: 0 };
 
   const loadSample = useCallback(async (instrument: string, ctx: AudioContext): Promise<AudioBuffer | null> => {
     if (sampleCacheRef.current[instrument]) return sampleCacheRef.current[instrument];
@@ -31,14 +35,28 @@ function useAudio() {
       piano: '/sounds/piano-note.mp3',
       clarinet: '/sounds/clarinet-note.mp3',
       recorder: '/sounds/recorder-note.mp3',
+      kick: '/sounds/kick.mp3',
+      punch: '/sounds/punch.mp3',
+      block: '/sounds/block.mp3',
     };
-    const url = urls[instrument];
+    const url = instrument.startsWith('/') ? instrument : urls[instrument];
     if (!url) return null;
     const p = fetch(url)
-      .then(r => r.arrayBuffer())
-      .then(ab => ctx.decodeAudioData(ab))
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.arrayBuffer();
+      })
+      .then(ab => {
+        // Some browsers need a copy because decodeAudioData detaches the buffer
+        const copy = ab.slice(0);
+        return ctx.decodeAudioData(copy);
+      })
       .then(buf => { sampleCacheRef.current[instrument] = buf; return buf; })
-      .catch(() => null);
+      .catch(() => {
+        // Clear failed cache so it can be retried
+        delete sampleLoadingRef.current[instrument];
+        return null;
+      });
     sampleLoadingRef.current[instrument] = p;
     return p;
   }, []);
@@ -89,6 +107,23 @@ function useAudio() {
     } catch (_e) {}
   }, [getAudioContext]);
 
+  // Stop all currently playing sounds
+  const stopAllSounds = useCallback(() => {
+    // Stop buffer sources
+    activeSourcesRef.current.forEach(src => {
+      try { src.stop(); } catch (_e) {}
+    });
+    activeSourcesRef.current = [];
+    // Stop oscillator sources
+    activeOscillatorsRef.current.forEach(osc => {
+      try { osc.stop(); } catch (_e) {}
+    });
+    activeOscillatorsRef.current = [];
+    // Clear melody timeouts
+    melodyTimersRef.current.forEach(t => clearTimeout(t));
+    melodyTimersRef.current = [];
+  }, []);
+
   // Realistic instrument synthesis (uses real MP3 samples for piano/clarinet/recorder)
   const playNote = useCallback((freq: number, duration: number, instrument: InstrumentName = 'piano') => {
     try {
@@ -97,77 +132,49 @@ function useAudio() {
       if (ctx.state !== 'running') ctx.resume();
 
       // --- Real sample playback ---
-      if (instrument === 'piano' || instrument === 'clarinet' || instrument === 'recorder') {
+      const isTonal = instrument === 'piano' || instrument === 'clarinet' || instrument === 'recorder';
+      const isCombat = instrument === 'kick' || instrument === 'punch' || instrument === 'block';
+      if (isTonal || isCombat) {
         const baseFreq = SAMPLE_BASE[instrument] || 261.63;
-        const detuneCents = 1200 * Math.log2(freq / baseFreq);
+        const detuneCents = isTonal ? 1200 * Math.log2(freq / baseFreq) : 0;
         loadSample(instrument, ctx).then(buf => {
-          if (!buf) return; // fallback handled below via synthesis
+          if (!buf) return;
           const now = ctx.currentTime + 0.01;
           const src = ctx.createBufferSource();
           src.buffer = buf;
-          src.detune.value = detuneCents;
+          if (isTonal) src.detune.value = detuneCents;
           const gainNode = ctx.createGain();
           gainNode.gain.setValueAtTime(0.85, now);
-          gainNode.gain.setValueAtTime(0.85, now + duration);
-          gainNode.gain.exponentialRampToValueAtTime(0.0001, now + duration + 0.4);
-          src.connect(gainNode).connect(ctx.destination);
-          src.start(now);
-          src.stop(now + duration + 0.5);
-        }).catch(() => {/* ignore, synthesis fallback not triggered async */});
-        return; // return early; sample path is async above
-      }
-
-      const now = ctx.currentTime + 0.01;
-      const releaseTail = Math.max(0.08, duration * 0.45);
-      const stopAt = now + duration + releaseTail + 0.08;
-      const output = ctx.createGain();
-      output.gain.value = 0.92;
-      output.connect(ctx.destination);
-
-      if (instrument === 'kick') {
-        // Kick: low thump
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(150, now);
-        osc.frequency.exponentialRampToValueAtTime(50, now + 0.15);
-        gain.gain.setValueAtTime(0.6, now);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
-        osc.connect(gain).connect(output);
-        osc.start(now); osc.stop(now + 0.3);
-      } else if (instrument === 'punch') {
-        // Punch: mid impact
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'square';
-        osc.frequency.setValueAtTime(300, now);
-        osc.frequency.exponentialRampToValueAtTime(100, now + 0.1);
-        gain.gain.setValueAtTime(0.4, now);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
-        osc.connect(gain).connect(output);
-        osc.start(now); osc.stop(now + 0.15);
-      } else if (instrument === 'block') {
-        // Block: sharp snap
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'square';
-        osc.frequency.value = 800;
-        gain.gain.setValueAtTime(0.3, now);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
-        osc.connect(gain).connect(output);
-        osc.start(now); osc.stop(now + 0.08);
+          if (isTonal) {
+            gainNode.gain.setValueAtTime(0.85, now + duration);
+            gainNode.gain.exponentialRampToValueAtTime(0.0001, now + duration + 0.4);
+            src.connect(gainNode).connect(ctx.destination);
+            src.start(now);
+            src.stop(now + duration + 0.5);
+          } else {
+            src.connect(gainNode).connect(ctx.destination);
+            src.start(now);
+          }
+          activeSourcesRef.current.push(src);
+          src.onended = () => {
+            activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== src);
+          };
+        }).catch(() => {});
+        return;
       }
     } catch (e) { /* silent fail */ }
   }, [getAudioContext, loadSample]);
 
   // Play melody with instrument
   const playMelody = useCallback((notes: NoteEvent[], tempo: number = 200, instrument: 'piano' | 'clarinet' | 'recorder' = 'piano') => {
+    stopAllSounds(); // stop any previous melody/sounds
     let t = 0;
     notes.forEach((n) => {
-      setTimeout(() => playNote(n.freq, Math.max(0.16, n.dur), instrument), t);
+      const timer = setTimeout(() => playNote(n.freq, Math.max(0.16, n.dur), instrument), t);
+      melodyTimersRef.current.push(timer);
       t += Math.max(tempo, n.dur * 760);
     });
-  }, [playNote]);
+  }, [playNote, stopAllSounds]);
 
   // Longer kid-friendly melodic motifs inspired by the songs' energy.
   const s = 0.24;
@@ -198,12 +205,42 @@ function useAudio() {
     { freq: 783.99, dur: g }, { freq: 659.25, dur: g }, { freq: 587.33, dur: g }, { freq: 523.25, dur: g * 1.9 },
   ];
 
-  return { playNote, playMelody, sodaPopMelody, goldenMelody, initAudio };
+  // Play a sound clip from a URL path (max duration in seconds, default 5)
+  const playSoundClip = useCallback((url: string, maxDuration: number = 5) => {
+    try {
+      const ctx = getAudioContext();
+      if (!ctx) return;
+      if (ctx.state !== 'running') ctx.resume();
+      stopAllSounds();
+      loadSample(url, ctx).then(buf => {
+        if (!buf) return;
+        const now = ctx.currentTime + 0.01;
+        const dur = Math.min(maxDuration, buf.duration);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        const gainNode = ctx.createGain();
+        gainNode.gain.setValueAtTime(0.9, now);
+        gainNode.gain.setValueAtTime(0.9, now + dur - 0.3);
+        gainNode.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+        src.connect(gainNode).connect(ctx.destination);
+        src.start(now);
+        src.stop(now + dur);
+        activeSourcesRef.current.push(src);
+        src.onended = () => { activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== src); };
+      }).catch(() => {});
+    } catch (_e) {}
+  }, [getAudioContext, loadSample, stopAllSounds]);
+
+  return { playNote, playMelody, playSoundClip, sodaPopMelody, goldenMelody, initAudio, stopAllSounds };
 }
 
-// ===== PIANO KEYBOARD (mobile: 16 white keys, desktop: 3 octaves) =====
-function PianoKeyboard({ onClose, playNote, initAudio }: { onClose: () => void; playNote: (f: number, d: number, inst?: InstrumentName) => void; initAudio: () => void }) {
+// ===== PIANO KEYBOARD (mobile: 2 octaves, desktop: 3 octaves) =====
+function PianoKeyboard({ onClose, playNote, initAudio, stopAllSounds }: { onClose: () => void; playNote: (f: number, d: number, inst?: InstrumentName) => void; initAudio: () => void; stopAllSounds: () => void }) {
   const [isPhone, setIsPhone] = useState(false);
+  const [instrument, setInstrument] = useState<'piano' | 'clarinet' | 'recorder'>('piano');
+  const [activeKeys, setActiveKeys] = useState<Set<string>>(new Set());
+  const scrollRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     const checkScreen = () => {
       setIsPhone(window.innerWidth < 768 || /iPhone|iPod|Android.*Mobile/i.test(navigator.userAgent));
@@ -217,81 +254,165 @@ function PianoKeyboard({ onClose, playNote, initAudio }: { onClose: () => void; 
 
   const generateKeys = (): PianoKey[] => {
     const startMidi = isPhone ? 60 : 48;
-    const endMidi = isPhone ? 86 : 84;
+    const endMidi = isPhone ? 84 : 84;
     let whiteIndex = 0;
     const keys: PianoKey[] = [];
-
     for (let midi = startMidi; midi <= endMidi; midi += 1) {
       const semitone = midi % 12;
       const note = noteNames[semitone];
       const octave = Math.floor(midi / 12) - 1;
       const white = !note.includes('#');
-      keys.push({
-        note: `${note}${octave}`,
-        freq: 440 * Math.pow(2, (midi - 69) / 12),
-        white,
-        black: !white,
-        whiteIndex: white ? whiteIndex++ : Math.max(0, whiteIndex - 1),
-      });
+      keys.push({ note: `${note}${octave}`, freq: 440 * Math.pow(2, (midi - 69) / 12), white, black: !white, whiteIndex: white ? whiteIndex++ : Math.max(0, whiteIndex - 1) });
     }
-
     return keys;
   };
 
   const allKeys = generateKeys();
   const whiteKeys = allKeys.filter(k => k.white);
   const blackKeys = allKeys.filter(k => k.black);
-  const keyWidth = isPhone ? 42 : 38;
-  const keyGap = 2;
-  const blackWidth = Math.round(keyWidth * 0.62);
+  const keyWidth = isPhone ? 44 : 40;
+  const keyGap = 1;
+  const blackWidth = Math.round(keyWidth * 0.58);
+  const whiteHeight = isPhone ? 180 : 200;
+  const blackHeight = isPhone ? 110 : 125;
 
   const getBlackKeyLeft = (key: PianoKey) => ((key.whiteIndex + 1) * (keyWidth + keyGap)) - Math.round(blackWidth / 2);
 
-  const handleWhiteKey = (freq: number) => {
+  const pressKey = useCallback((note: string, freq: number, isBlack: boolean) => {
     initAudio();
-    playNote(freq, 0.6, 'piano');
-  };
-  const handleBlackKey = (freq: number) => {
-    initAudio();
-    playNote(freq, 0.5, 'piano');
-  };
+    playNote(freq, isBlack ? 0.5 : 0.6, instrument);
+    setActiveKeys(prev => new Set(prev).add(note));
+    setTimeout(() => setActiveKeys(prev => { const s = new Set(prev); s.delete(note); return s; }), 200);
+  }, [initAudio, playNote, instrument]);
+
+  // Keyboard mapping: computer keys → MIDI notes (starting at C4 = midi 60)
+  const keyboardMap = useRef<Record<string, { note: string; freq: number; isBlack: boolean }>>({});
+  useEffect(() => {
+    const map: Record<string, { note: string; freq: number; isBlack: boolean }> = {};
+    // Bottom row: white keys C4-B4, top row: sharps
+    const whiteRow = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', "'"];
+    const blackRow = ['w', 'e', '', 't', 'y', 'u', '', 'o', 'p'];
+    const c4Keys = allKeys.filter(k => {
+      const midi = Math.round(12 * Math.log2(k.freq / 440) + 69);
+      return midi >= 60 && midi <= 76;
+    });
+    const c4White = c4Keys.filter(k => k.white);
+    const c4Black = c4Keys.filter(k => k.black);
+    c4White.forEach((k, i) => { if (whiteRow[i]) map[whiteRow[i]] = { note: k.note, freq: k.freq, isBlack: false }; });
+    c4Black.forEach((k, i) => { if (blackRow[i]) map[blackRow[i]] = { note: k.note, freq: k.freq, isBlack: true }; });
+    keyboardMap.current = map;
+  }, [allKeys]);
+
+  useEffect(() => {
+    const pressed = new Set<string>();
+    const down = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      const key = e.key.toLowerCase();
+      if (key === 'escape') { onClose(); return; }
+      const mapping = keyboardMap.current[key];
+      if (mapping && !pressed.has(key)) {
+        pressed.add(key);
+        pressKey(mapping.note, mapping.freq, mapping.isBlack);
+      }
+    };
+    const up = (e: KeyboardEvent) => { pressed.delete(e.key.toLowerCase()); };
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
+  }, [pressKey, onClose]);
+
+  // Auto-scroll to middle on mount
+  useEffect(() => {
+    if (scrollRef.current) {
+      const container = scrollRef.current;
+      const scrollTarget = (container.scrollWidth - container.clientWidth) / 2;
+      container.scrollLeft = scrollTarget;
+    }
+  }, [isPhone]);
 
   const totalWhiteKeys = whiteKeys.length;
   const pianoWidth = totalWhiteKeys * (keyWidth + keyGap);
 
+  const getNoteLetter = (note: string) => note.replace(/[0-9]/g, '');
+  const getNoteOctave = (note: string) => note.replace(/[^0-9]/g, '');
+
   return (
-    <div className="fixed inset-0 z-[9000] flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-gradient-to-b from-gray-900 via-gray-800 to-gray-900 rounded-t-3xl sm:rounded-3xl p-4 pb-8 sm:pb-4 shadow-2xl w-full max-w-5xl" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[9000] flex items-end sm:items-center justify-center bg-black/80 backdrop-blur-md" onClick={onClose}>
+      <div className="bg-gradient-to-b from-gray-900 via-gray-850 to-gray-950 rounded-t-3xl sm:rounded-3xl p-4 pb-8 sm:pb-5 shadow-2xl w-full max-w-5xl border border-white/10" onClick={e => e.stopPropagation()}>
+        {/* Header */}
         <div className="flex justify-between items-center mb-3">
-          <h3 className="text-xl font-bold text-white">🎹 Piano</h3>
-          <button onClick={onClose} className="text-white/60 hover:text-white text-2xl px-3">✕</button>
+          <h3 className="text-xl font-bold text-white">🎹 Virtual Piano</h3>
+          <button onClick={onClose} className="text-white/60 hover:text-white text-2xl px-3 hover:rotate-90 transition-transform">✕</button>
         </div>
-        {/* Scrollable piano keys */}
-        <div className="overflow-x-auto pb-2">
-          <div className="relative flex" style={{ width: `${pianoWidth}px`, minWidth: `${pianoWidth}px` }}>
-            {whiteKeys.map((k) => (
-              <button key={k.note}
-                onTouchStart={(e) => { e.preventDefault(); handleWhiteKey(k.freq); }}
-                onMouseDown={() => handleWhiteKey(k.freq)}
-                className={`bg-gradient-to-b from-white via-gray-50 to-gray-200 border border-gray-300 mx-[1px] rounded-b-lg active:from-yellow-200 active:to-yellow-400 active:scale-95 transition-all shadow-md flex-shrink-0`}
-                style={{ width: `${keyWidth}px`, height: isPhone ? '170px' : '180px' }}
-              />
-            ))}
-            {blackKeys.map((k) => (
-              <button key={k.note}
-                onTouchStart={(e) => { e.preventDefault(); handleBlackKey(k.freq); }}
-                onMouseDown={() => handleBlackKey(k.freq)}
-                className={`absolute bg-gradient-to-b from-gray-700 to-black rounded-b-lg active:from-purple-700 active:to-purple-900 active:scale-95 transition-all shadow-lg z-10`}
-                style={{
-                  width: `${blackWidth}px`,
-                  height: isPhone ? '100px' : '110px',
-                  left: `${getBlackKeyLeft(k)}px`,
-                }}
-              />
-            ))}
+        {/* Instrument selector */}
+        <div className="flex justify-center gap-2 mb-4">
+          {(['piano', 'clarinet', 'recorder'] as const).map((inst) => (
+            <button key={inst}
+              onClick={() => { stopAllSounds(); setInstrument(inst); }}
+              className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
+                instrument === inst
+                  ? 'bg-white text-gray-900 shadow-lg scale-105'
+                  : 'bg-white/10 text-white/60 hover:bg-white/20 hover:text-white/90'
+              }`}
+            >
+              {inst === 'piano' ? '🎹 Piano' : inst === 'clarinet' ? '🎵 Clarinet' : '🎶 Recorder'}
+            </button>
+          ))}
+        </div>
+        {/* Piano keys */}
+        <div ref={scrollRef} className="overflow-x-auto pb-2 scrollbar-thin" style={{ scrollbarWidth: 'thin' }}>
+          <div className="relative flex select-none" style={{ width: `${pianoWidth}px`, minWidth: `${pianoWidth}px` }}>
+            {/* White keys */}
+            {whiteKeys.map((k) => {
+              const isActive = activeKeys.has(k.note);
+              const letter = getNoteLetter(k.note);
+              const octave = getNoteOctave(k.note);
+              const isC = letter === 'C';
+              return (
+                <button key={k.note}
+                  onTouchStart={(e) => { e.preventDefault(); pressKey(k.note, k.freq, false); }}
+                  onMouseDown={() => pressKey(k.note, k.freq, false)}
+                  className={`relative border rounded-b-lg transition-all duration-75 flex-shrink-0 flex flex-col items-center justify-end pb-2 ${
+                    isActive
+                      ? 'bg-gradient-to-b from-yellow-100 to-yellow-300 border-yellow-400 scale-[0.97] shadow-inner'
+                      : 'bg-gradient-to-b from-white via-gray-50 to-gray-100 border-gray-300 hover:from-gray-50 hover:to-gray-200 shadow-md'
+                  } ${isC ? 'border-l-2 border-l-gray-400' : ''}`}
+                  style={{ width: `${keyWidth}px`, height: `${whiteHeight}px`, margin: `0 ${keyGap / 2}px` }}
+                >
+                  <span className={`text-[10px] font-bold select-none ${isActive ? 'text-yellow-700' : isC ? 'text-gray-800' : 'text-gray-400'}`}>
+                    {letter}
+                  </span>
+                  {isC && <span className={`text-[8px] select-none ${isActive ? 'text-yellow-600' : 'text-gray-300'}`}>{octave}</span>}
+                </button>
+              );
+            })}
+            {/* Black keys */}
+            {blackKeys.map((k) => {
+              const isActive = activeKeys.has(k.note);
+              return (
+                <button key={k.note}
+                  onTouchStart={(e) => { e.preventDefault(); pressKey(k.note, k.freq, true); }}
+                  onMouseDown={() => pressKey(k.note, k.freq, true)}
+                  className={`absolute rounded-b-lg transition-all duration-75 z-10 ${
+                    isActive
+                      ? 'bg-gradient-to-b from-purple-600 to-purple-800 shadow-inner scale-[0.97]'
+                      : 'bg-gradient-to-b from-gray-600 via-gray-800 to-black hover:from-gray-500 hover:to-gray-900 shadow-lg'
+                  }`}
+                  style={{
+                    width: `${blackWidth}px`,
+                    height: `${blackHeight}px`,
+                    left: `${getBlackKeyLeft(k)}px`,
+                  }}
+                />
+              );
+            })}
           </div>
         </div>
-        <p className="text-white/40 text-center mt-3 text-sm">{isPhone ? '16 white keys · two scales · swipe to scroll' : '3 octaves: C3 → C6'} 🎵</p>
+        {/* Footer info */}
+        <div className="flex justify-between items-center mt-3 px-1">
+          <p className="text-white/30 text-xs">{isPhone ? 'Swipe to scroll · Tap to play' : 'Use keyboard: A-L for white keys, W-P for sharps'}</p>
+          <p className="text-white/30 text-xs">{isPhone ? '2 octaves: C4 → C5' : '3 octaves: C3 → C5'} 🎵</p>
+        </div>
       </div>
     </div>
   );
@@ -327,43 +448,59 @@ function PokemonEffect({ type, x, y, onDone }: { type: string; x: number; y: num
 
 // ===== CUSTOM CURSOR =====
 function CustomCursor() {
-  const [pos, setPos] = useState({ x: 0, y: 0 });
-  const [trails, setTrails] = useState<{ x: number; y: number; id: number }[]>([]);
-  const trailId = useRef(0);
+  const cursorRef = useRef<HTMLDivElement>(null);
+  const trailRefs = useRef<(HTMLSpanElement | null)[]>([]);
+  const positions = useRef<{ x: number; y: number }[]>(Array.from({ length: 6 }, () => ({ x: -50, y: -50 })));
+  const posIdx = useRef(0);
 
   useEffect(() => {
+    let rafId = 0;
+    const update = () => {
+      const main = cursorRef.current;
+      if (main) {
+        const p = positions.current[posIdx.current % positions.current.length];
+        main.style.transform = `translate(${p.x - 15}px, ${p.y - 15}px)`;
+      }
+      trailRefs.current.forEach((el, i) => {
+        if (!el) return;
+        const idx = (posIdx.current - (i + 1) * 2 + positions.current.length * 100) % positions.current.length;
+        const tp = positions.current[idx];
+        el.style.transform = `translate(${tp.x - 10}px, ${tp.y - 10}px) scale(${(i + 1) / trailRefs.current.length})`;
+        el.style.opacity = `${(i + 1) / trailRefs.current.length * 0.5}`;
+      });
+      rafId = requestAnimationFrame(update);
+    };
     const move = (e: MouseEvent) => {
-      trailId.current += 1;
-      const id = trailId.current;
-      setPos({ x: e.clientX, y: e.clientY });
-      setTrails(prev => [...prev.slice(-8), { x: e.clientX, y: e.clientY, id }]);
+      posIdx.current = (posIdx.current + 1) % positions.current.length;
+      positions.current[posIdx.current] = { x: e.clientX, y: e.clientY };
     };
     window.addEventListener('mousemove', move);
-    return () => window.removeEventListener('mousemove', move);
-  }, []); 
+    rafId = requestAnimationFrame(update);
+    return () => { window.removeEventListener('mousemove', move); cancelAnimationFrame(rafId); };
+  }, []);
 
   return (
     <div className="fixed inset-0 pointer-events-none z-[9999] hidden md:block">
-      {trails.map((t, i) => (
-        <span key={t.id} className="absolute text-lg transition-all duration-300" style={{
-          left: t.x - 10, top: t.y - 10,
-          opacity: (i + 1) / trails.length * 0.5,
-          transform: `scale(${(i + 1) / trails.length})`,
-        }}>⭐</span>
+      {Array.from({ length: 4 }).map((_, i) => (
+        <span key={i} ref={el => { trailRefs.current[i] = el; }} className="absolute text-lg" style={{ left: 0, top: 0, willChange: 'transform, opacity' }}>⭐</span>
       ))}
-      <span className="absolute text-3xl transition-transform duration-100" style={{ left: pos.x - 15, top: pos.y - 15, transform: 'rotate(0deg)' }}>⚡</span>
+      <div ref={cursorRef} className="absolute text-3xl" style={{ left: 0, top: 0, willChange: 'transform' }}>⚡</div>
     </div>
   );
 }
 
 // ===== SCROLL PROGRESS =====
 function ScrollProgress() {
-  const [progress, setProgress] = useState(0);
+  const barRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const onScroll = () => { const h = document.documentElement.scrollHeight - window.innerHeight; setProgress(h > 0 ? (window.scrollY / h) * 100 : 0); };
-    window.addEventListener('scroll', onScroll); return () => window.removeEventListener('scroll', onScroll);
+    const onScroll = () => {
+      const h = document.documentElement.scrollHeight - window.innerHeight;
+      if (barRef.current) barRef.current.style.width = `${h > 0 ? (window.scrollY / h) * 100 : 0}%`;
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
   }, []);
-  return <div className="fixed top-0 left-0 h-1 bg-gradient-to-r from-pink-500 via-purple-500 to-blue-500 z-[100]" style={{ width: `${progress}%` }} />;
+  return <div ref={barRef} className="fixed top-0 left-0 h-1 bg-gradient-to-r from-pink-500 via-purple-500 to-blue-500 z-[100]" style={{ width: '0%' }} />;
 }
 
 // ===== SPARKLES =====
@@ -387,9 +524,11 @@ function LoadingScreen({ onFinish }: { onFinish: () => void }) {
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center">
       <div className="text-center">
-        <div className="text-6xl mb-4 animate-bounce">⚡</div>
+        <div className="relative w-40 h-72 mx-auto mb-4">
+          <Image src="/images/jay.jpg" alt="Jayden" fill className={`object-contain drop-shadow-2xl transition-all duration-500 ${progress < 100 ? 'animate-pulse scale-95' : 'scale-110'}`} priority />
+        </div>
         <h1 className="text-3xl font-bold text-white mb-4">Jayden&apos;s World</h1>
-        <div className="w-64 h-3 bg-purple-800 rounded-full overflow-hidden"><div className="h-full bg-gradient-to-r from-pink-500 to-yellow-500 transition-all" style={{ width: `${progress}%` }} /></div>
+        <div className="w-64 h-3 bg-purple-800 rounded-full overflow-hidden mx-auto"><div className="h-full bg-gradient-to-r from-pink-500 to-yellow-500 transition-all" style={{ width: `${progress}%` }} /></div>
         <p className="text-purple-300 mt-2">{progress}%</p>
       </div>
     </div>
@@ -420,7 +559,8 @@ function TiltCard({ children }: { children: React.ReactNode }) {
 
 // ===== FLOATING EMOJI =====
 function FloatingEmoji({ emoji, delay, left }: { emoji: string; delay: number; left: string }) {
-  return <span className="absolute text-4xl animate-bounce pointer-events-none opacity-30" style={{ left, top: `${20 + Math.random() * 60}%`, animationDelay: `${delay}s`, animationDuration: '3s' }}>{emoji}</span>;
+  const [top] = useState(() => `${20 + Math.random() * 60}%`);
+  return <span className="absolute text-4xl animate-bounce pointer-events-none opacity-30" style={{ left, top, animationDelay: `${delay}s`, animationDuration: '3s' }}>{emoji}</span>;
 }
 
 // ===== NAV DOTS =====
@@ -436,57 +576,209 @@ function NavDots({ sections, active }: { sections: string[]; active: number }) {
 
 // ===== VIRTUAL PIKACHU =====
 function VirtualPikachu() {
-  const [mood, setMood] = useState('happy');
-  const [hunger, setHunger] = useState(80);
-  const [energy, setEnergy] = useState(90);
-  const poke = () => setMood(m => m === 'happy' ? 'excited' : 'happy');
-  const feed = () => { setHunger(h => Math.min(100, h + 15)); setMood('eating'); setTimeout(() => setMood('happy'), 1500); };
-  const play = () => { setEnergy(e => Math.max(0, e - 10)); setMood('playing'); setTimeout(() => setMood('happy'), 2000); };
-  const faces: Record<string, string> = { happy: '(◕‿◕)', excited: '(★‿★)', eating: '(◕ᴗ◕)🍕', playing: '(≧▽≦)⚡', tired: '(─‿─)💤' };
+  const [hunger, setHunger] = useState(10);
+  const [energy, setEnergy] = useState(80);
+  const [happiness, setHappiness] = useState(70);
+  const [sleeping, setSleeping] = useState(false);
+  const [actionText, setActionText] = useState<string | null>(null);
+  const actionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const showAction = useCallback((text: string) => {
+    if (actionTimeoutRef.current) clearTimeout(actionTimeoutRef.current);
+    setActionText(text);
+    actionTimeoutRef.current = setTimeout(() => setActionText(null), 1500);
+  }, []);
+
+  const hungerRef = useRef(hunger);
+  const energyRef = useRef(energy);
+  hungerRef.current = hunger;
+  energyRef.current = energy;
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setHunger(h => Math.min(100, h + (sleeping ? 1 : 2)));
+      setEnergy(e => sleeping ? Math.min(100, e + 20) : Math.max(0, e - 1));
+      setHappiness(prev => {
+        let target = 50;
+        if (hungerRef.current > 75) target -= 15;
+        if (energyRef.current < 15) target -= 15;
+        if (prev > target) return Math.max(0, prev - 1);
+        if (prev < target) return Math.min(100, prev + 1);
+        return prev;
+      });
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [sleeping]);
+
+  const mood = sleeping ? 'sleeping'
+    : energy < 15 ? 'exhausted'
+    : hunger > 75 ? 'hungry'
+    : happiness < 30 ? 'sad'
+    : happiness > 70 ? 'happy'
+    : 'neutral';
+
+  const feed = useCallback(() => {
+    if (sleeping) return;
+    setHunger(h => Math.max(0, h - 20));
+    setHappiness(h => Math.min(100, h + 5));
+    showAction('Yummy! 🍎');
+  }, [sleeping, showAction]);
+
+  const play = useCallback(() => {
+    if (sleeping || energy < 15) return;
+    setHappiness(h => Math.min(100, h + 15));
+    setEnergy(e => Math.max(0, e - 15));
+    setHunger(h => Math.min(100, h + 5));
+    showAction('Wheee! ⚡');
+  }, [sleeping, energy, showAction]);
+
+  const pet = useCallback(() => {
+    setHappiness(h => Math.min(100, h + 8));
+    showAction(sleeping ? 'Zzz...' : 'Pika~! 💕');
+  }, [sleeping, showAction]);
+
+  const toggleSleep = useCallback(() => {
+    setSleeping(s => !s);
+    showAction(sleeping ? 'Pika!' : 'Zzz...');
+  }, [sleeping, showAction]);
+
+  const canFeed = !sleeping;
+  const canPlay = !sleeping && energy >= 15;
+
+  const imageWrapperClass = mood === 'happy' ? 'animate-bounce'
+    : mood === 'sleeping' ? 'grayscale-50 scale-90'
+    : mood === 'hungry' ? 'animate-pulse border-2 border-red-400 rounded-full'
+    : mood === 'sad' ? 'grayscale scale-75'
+    : mood === 'exhausted' ? 'grayscale-75 opacity-60'
+    : '';
+
+  const imageWrapperStyle = mood === 'happy'
+    ? { filter: 'drop-shadow(0 0 20px rgba(250, 204, 21, 0.7))' }
+    : {};
+
   return (
     <div className="text-center">
-      <div className="text-8xl mb-4 cursor-pointer hover:scale-110 transition" onClick={poke}>⚡</div>
-      <div className="text-3xl mb-4">{faces[mood]}</div>
-      <div className="grid grid-cols-2 gap-4 mb-4">
-        <div><span className="text-sm">🍎 Hunger</span><div className="h-3 bg-gray-700 rounded-full mt-1"><div className="h-full bg-green-500 rounded-full transition-all" style={{ width: `${hunger}%` }} /></div></div>
-        <div><span className="text-sm">⚡ Energy</span><div className="h-3 bg-gray-700 rounded-full mt-1"><div className="h-full bg-yellow-500 rounded-full transition-all" style={{ width: `${energy}%` }} /></div></div>
+      <div className="relative inline-block mb-4 cursor-pointer" onClick={pet}>
+        <div className={`transition-all duration-500 ${imageWrapperClass}`} style={imageWrapperStyle}>
+          <Image src="/images/pokemon/pikachu.png" alt="Pikachu" width={160} height={160} className="mx-auto" />
+        </div>
+        {mood === 'sleeping' && (
+          <span className="absolute -top-2 -right-2 text-3xl animate-pulse">💤</span>
+        )}
+        {actionText && (
+          <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-2xl font-bold text-yellow-300 animate-bounce whitespace-nowrap">
+            {actionText}
+          </div>
+        )}
       </div>
-      <div className="flex justify-center gap-3">
-        <button onClick={feed} className="px-4 py-2 bg-green-500 rounded-full hover:scale-110 transition">🍎 Feed</button>
-        <button onClick={play} className="px-4 py-2 bg-yellow-500 rounded-full hover:scale-110 transition text-black">🎾 Play</button>
-        <button onClick={poke} className="px-4 py-2 bg-pink-500 rounded-full hover:scale-110 transition">🤗 Poke</button>
+      <div className="grid grid-cols-3 gap-3 mb-4">
+        <div>
+          <span className="text-sm">🍎 Hunger</span>
+          <div className="h-3 bg-gray-700 rounded-full mt-1">
+            <div className={`h-full rounded-full transition-all ${hunger > 75 ? 'bg-red-500' : hunger > 40 ? 'bg-orange-400' : 'bg-green-500'}`} style={{ width: `${hunger}%` }} />
+          </div>
+        </div>
+        <div>
+          <span className="text-sm">⚡ Energy</span>
+          <div className="h-3 bg-gray-700 rounded-full mt-1">
+            <div className="h-full bg-yellow-500 rounded-full transition-all" style={{ width: `${energy}%` }} />
+          </div>
+        </div>
+        <div>
+          <span className="text-sm">💕 Happy</span>
+          <div className="h-3 bg-gray-700 rounded-full mt-1">
+            <div className="h-full bg-pink-500 rounded-full transition-all" style={{ width: `${happiness}%` }} />
+          </div>
+        </div>
+      </div>
+      <div className="flex justify-center gap-3 flex-wrap">
+        <button onClick={feed} disabled={!canFeed} className={`px-4 py-2 bg-green-500 rounded-full transition ${canFeed ? 'hover:scale-110' : 'opacity-50 cursor-not-allowed'}`}>🍎 Feed</button>
+        <button onClick={play} disabled={!canPlay} className={`px-4 py-2 bg-yellow-500 rounded-full transition text-black ${canPlay ? 'hover:scale-110' : 'opacity-50 cursor-not-allowed'}`}>🎾 Play</button>
+        <button onClick={pet} className="px-4 py-2 bg-pink-500 rounded-full hover:scale-110 transition">🤗 Pet</button>
+        <button onClick={toggleSleep} className="px-4 py-2 bg-indigo-500 rounded-full hover:scale-110 transition">{sleeping ? '☀️ Wake' : '😴 Sleep'}</button>
       </div>
     </div>
   );
 }
 
 // ===== MEMORY GAME =====
+const MEMORY_EMOJIS = ['🕷️', '⚡', '🎵', '🥋', '⭐', '🎨', '🎮', '🍕'];
 function MemoryGame() {
-  const emojis = ['🕷️', '⚡', '🎵', '🥋', '⭐', '🎨', '🎮', '🍕'];
-  const [cards, setCards] = useState<{ id: number; emoji: string; flipped: boolean; matched: boolean }[]>([]);
+  const [cards, setCards] = useState<{ id: number; emoji: string; matched: boolean }[]>([]);
   const [selected, setSelected] = useState<number[]>([]);
   const [moves, setMoves] = useState(0);
-  useEffect(() => { const d = [...emojis, ...emojis].sort(() => Math.random() - 0.5).map((emoji, i) => ({ id: i, emoji, flipped: false, matched: false })); setCards(d); }, []);
+  const [locked, setLocked] = useState(false);
+
+  const initCards = useCallback(() => {
+    const d = [...MEMORY_EMOJIS, ...MEMORY_EMOJIS]
+      .sort(() => Math.random() - 0.5)
+      .map((emoji, i) => ({ id: i, emoji, matched: false }));
+    setCards(d);
+    setSelected([]);
+    setMoves(0);
+    setLocked(false);
+  }, []);
+
+  useEffect(() => { initCards(); }, [initCards]);
+
   useEffect(() => {
     if (selected.length === 2) {
       setMoves(m => m + 1);
+      setLocked(true);
       const [a, b] = selected;
-      if (cards[a].emoji === cards[b].emoji) { setCards(c => c.map((card, i) => (i === a || i === b ? { ...card, matched: true } : card))); setSelected([]); }
-      else setTimeout(() => setSelected([]), 800);
+      if (cards[a].emoji === cards[b].emoji) {
+        setCards(c => c.map((card, i) => (i === a || i === b ? { ...card, matched: true } : card)));
+        setSelected([]);
+        setLocked(false);
+      } else {
+        setTimeout(() => { setSelected([]); setLocked(false); }, 800);
+      }
     }
   }, [selected, cards]);
-  const flip = (i: number) => { if (selected.length < 2 && !cards[i].matched && !cards[i].flipped) setSelected(s => [...s, i]); };
+
+  const flip = useCallback((i: number) => {
+    if (locked) return;
+    if (selected.length >= 2) return;
+    if (cards[i].matched) return;
+    if (selected.includes(i)) return;
+    setSelected(s => [...s, i]);
+  }, [locked, selected, cards]);
+
+  const won = cards.length > 0 && cards.every(c => c.matched);
+
   return (
     <div className="text-center">
-      <div className="mb-3 text-lg font-bold text-yellow-300">Moves: {moves}</div>
-      <div className="grid grid-cols-4 gap-2 max-w-xs mx-auto">
+      <div className="mb-3 flex items-center justify-center gap-4">
+        <span className="text-lg font-bold text-yellow-300">Moves: {moves}</span>
+        <button onClick={initCards} className="px-3 py-1 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-white text-sm font-semibold transition-colors">
+          Restart
+        </button>
+      </div>
+      <div className="grid grid-cols-4 gap-3 max-w-sm mx-auto">
         {cards.map((c, i) => (
-          <button key={c.id} onClick={() => flip(i)} className={`w-14 h-14 rounded-xl text-2xl transition-all ${c.matched ? 'bg-green-500/50' : selected.includes(i) ? 'bg-purple-500' : 'bg-indigo-600 hover:bg-indigo-500'} ${c.matched ? 'scale-90' : 'hover:scale-105'}`}>
+          <button
+            key={c.id}
+            onClick={() => flip(i)}
+            className={`aspect-square rounded-xl text-3xl transition-all ${
+              c.matched
+                ? 'bg-green-500/40 ring-2 ring-green-400 scale-90'
+                : selected.includes(i)
+                ? 'bg-purple-500 border-2 border-purple-300 scale-105'
+                : 'bg-indigo-600 hover:bg-indigo-500 hover:scale-105'
+            }`}
+          >
             {c.matched || selected.includes(i) ? c.emoji : '❓'}
           </button>
         ))}
       </div>
-      {cards.every(c => c.matched) && <div className="mt-3 text-green-400 font-bold animate-bounce">🎉 You Won!</div>}
+      {won && (
+        <div className="mt-4 text-green-400 font-bold animate-bounce">
+          <div className="text-xl">🎉 You Won in {moves} moves!</div>
+          <button onClick={initCards} className="mt-2 px-4 py-2 rounded-lg bg-green-600 hover:bg-green-500 text-white font-semibold transition-colors">
+            Play Again
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -497,25 +789,43 @@ function StarCatchGame() {
   const [score, setScore] = useState(0);
   const [timeLeft, setTimeLeft] = useState(25);
   const [stars, setStars] = useState<StarItem[]>([]);
+  const [popups, setPopups] = useState<{id:number;x:number;y:number}[]>([]);
   const starId = useRef(0);
+  const timeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+
+  const addTimeout = useCallback((fn: () => void, ms: number) => {
+    const t = setTimeout(fn, ms);
+    timeoutsRef.current.push(t);
+    return t;
+  }, []);
+
+  const clearAllTimeouts = useCallback(() => {
+    timeoutsRef.current.forEach(t => clearTimeout(t));
+    timeoutsRef.current = [];
+  }, []);
 
   const removeStar = useCallback((id: number) => {
     setStars(prev => prev.filter(star => star.id !== id));
   }, []);
 
-  const catchStar = useCallback((id: number) => {
+  const catchStar = useCallback((id: number, x: number, y: number) => {
     setScore(sc => sc + 1);
     setStars(prev => prev.filter(star => star.id !== id));
-  }, []);
+    const popupId = Date.now() + Math.random();
+    setPopups(prev => [...prev, { id: popupId, x, y }]);
+    addTimeout(() => {
+      setPopups(prev => prev.filter(p => p.id !== popupId));
+    }, 600);
+  }, [addTimeout]);
 
   const spawnStar = useCallback(() => {
     starId.current += 1;
     const id = starId.current;
     const nextStar: StarItem = {
       id,
-      x: Math.random() * 72 + 10,
-      y: Math.random() * 55 + 12,
-      size: Math.random() * 10 + 54,
+      x: Math.random() * 76 + 12,
+      y: Math.random() * 60 + 15,
+      size: Math.random() * 10 + 70,
       bornAt: Date.now(),
       fading: false,
     };
@@ -523,14 +833,15 @@ function StarCatchGame() {
       if (prev.length >= 3) return prev;
       return [...prev, nextStar];
     });
-    window.setTimeout(() => {
+    addTimeout(() => {
       setStars(prev => prev.map(star => (star.id === id ? { ...star, fading: true } : star)));
     }, 1800);
-    window.setTimeout(() => removeStar(id), 2500);
-  }, [removeStar]);
+    addTimeout(() => removeStar(id), 2500);
+  }, [removeStar, addTimeout]);
 
   useEffect(() => {
     if (!active) return;
+    spawnStar();
     const timer = setInterval(() => {
       setTimeLeft(t => {
         if (t <= 1) { setActive(false); return 0; }
@@ -540,10 +851,26 @@ function StarCatchGame() {
     const starSpawner = setInterval(() => {
       spawnStar();
     }, 1100);
-    return () => { clearInterval(timer); clearInterval(starSpawner); };
-  }, [active, spawnStar]);
+    return () => { clearInterval(timer); clearInterval(starSpawner); clearAllTimeouts(); };
+  }, [active, spawnStar, clearAllTimeouts]);
 
-  const startGame = () => { setActive(true); setScore(0); setTimeLeft(25); setStars([]); };
+  const startGame = () => {
+    clearAllTimeouts();
+    setActive(true);
+    setScore(0);
+    setTimeLeft(25);
+    setStars([]);
+    setPopups([]);
+  };
+
+  const stopGame = () => {
+    clearAllTimeouts();
+    setActive(false);
+    setTimeLeft(25);
+    setScore(0);
+    setStars([]);
+    setPopups([]);
+  };
 
   return (
     <div className="text-center">
@@ -561,14 +888,14 @@ function StarCatchGame() {
           <button onClick={startGame} className="px-8 py-3 bg-gradient-to-r from-yellow-400 to-orange-500 rounded-full font-bold text-xl hover:scale-110 transition">🔄 Play Again!</button>
         </div>
       ) : (
-        <div className="relative w-full h-72 bg-gradient-to-b from-indigo-900 via-indigo-800 to-purple-900 rounded-2xl overflow-hidden border border-white/10">
+        <div className="relative w-full h-80 bg-gradient-to-b from-indigo-900 via-indigo-800 to-purple-900 rounded-2xl overflow-hidden border border-white/10">
           <div className="absolute inset-x-0 top-0 h-10 bg-gradient-to-b from-white/10 to-transparent" />
           <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-pink-500/20 to-transparent" />
           {stars.map(s => (
             <button
               key={s.id}
-              onTouchStart={(e) => { e.preventDefault(); catchStar(s.id); }}
-              onClick={() => catchStar(s.id)}
+              onTouchStart={(e) => { e.preventDefault(); catchStar(s.id, s.x, s.y); }}
+              onClick={() => catchStar(s.id, s.x, s.y)}
               className={`absolute rounded-full flex items-center justify-center transition-all duration-500 touch-none ${s.fading ? 'opacity-0 scale-75' : 'opacity-100 scale-100'} animate-pulse`}
               style={{
                 left: `${s.x}%`,
@@ -584,9 +911,18 @@ function StarCatchGame() {
               <span className="text-3xl leading-none">⭐</span>
             </button>
           ))}
+          {popups.map(p => (
+            <div
+              key={p.id}
+              className="absolute pointer-events-none text-xl font-extrabold text-yellow-200 animate-bounce"
+              style={{ left: `${p.x}%`, top: `${p.y}%`, transform: 'translate(-50%, -130%)', textShadow: '0 0 8px rgba(255,200,0,0.8)' }}
+            >
+              +1
+            </div>
+          ))}
         </div>
       )}
-      {active && <button onClick={() => { setActive(false); setTimeLeft(25); setStars([]); }} className="mt-3 px-6 py-2 bg-red-500 rounded-full text-white font-bold">Stop</button>}
+      {active && <button onClick={stopGame} className="mt-3 px-6 py-2 bg-red-500 rounded-full text-white font-bold">Stop</button>}
     </div>
   );
 }
@@ -596,11 +932,43 @@ function SpiderManWebGame({ playNote, initAudio }: { playNote: (freq: number, du
   const [running, setRunning] = useState(false);
   const [score, setScore] = useState(0);
   const [timeLeft, setTimeLeft] = useState(20);
-  const [targets, setTargets] = useState<{ id: number; x: number; y: number; emoji: string }[]>([]);
+  const [targets, setTargets] = useState<{ id: number; x: number; y: number; emoji: string; points: number }[]>([]);
+  const [splashes, setSplashes] = useState<{ id: number; x: number; y: number; text: string }[]>([]);
   const idRef = useRef(0);
+  const timeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const spawnDelayRef = useRef(1200);
+  const lifetimeRef = useRef(2500);
+
+  const addTimeout = useCallback((fn: () => void, ms: number) => {
+    const t = setTimeout(fn, ms);
+    timeoutsRef.current.push(t);
+    return t;
+  }, []);
+
+  const clearAllTimeouts = useCallback(() => {
+    timeoutsRef.current.forEach(t => clearTimeout(t));
+    timeoutsRef.current = [];
+  }, []);
+
+  const spawnTarget = useCallback(() => {
+    idRef.current += 1;
+    const targetId = idRef.current;
+    const roll = Math.random();
+    const isBonus = roll < 0.15;
+    const emoji = isBonus ? '💎' : roll < 0.55 ? '🦹' : '🤖';
+    const points = isBonus ? 2 : 1;
+    setTargets(prev => [...prev.slice(-4), { id: targetId, x: Math.random() * 75 + 10, y: Math.random() * 55 + 15, emoji, points }]);
+    const lifetime = lifetimeRef.current;
+    addTimeout(() => {
+      setTargets(prev => prev.filter(target => target.id !== targetId));
+    }, lifetime);
+  }, [addTimeout]);
 
   useEffect(() => {
     if (!running) return;
+    spawnDelayRef.current = 1200;
+    lifetimeRef.current = 2500;
+
     const timer = setInterval(() => {
       setTimeLeft(t => {
         if (t <= 1) {
@@ -610,34 +978,56 @@ function SpiderManWebGame({ playNote, initAudio }: { playNote: (freq: number, du
         return t - 1;
       });
     }, 1000);
-    const spawner = setInterval(() => {
-      idRef.current += 1;
-      const targetId = idRef.current;
-      const emoji = Math.random() > 0.45 ? '🦹' : '🤖';
-      setTargets(prev => [...prev.slice(-4), { id: targetId, x: Math.random() * 76 + 8, y: Math.random() * 50 + 14, emoji }]);
-      window.setTimeout(() => {
-        setTargets(prev => prev.filter(target => target.id !== targetId));
-      }, 2200);
-    }, 950);
+
+    const difficultyTimer = setInterval(() => {
+      spawnDelayRef.current = Math.max(500, spawnDelayRef.current - 100);
+      lifetimeRef.current = Math.max(1200, lifetimeRef.current - 150);
+    }, 5000);
+
+    let spawnTimeout: ReturnType<typeof setTimeout>;
+    const scheduleSpawn = () => {
+      spawnTarget();
+      spawnTimeout = setTimeout(scheduleSpawn, spawnDelayRef.current);
+      timeoutsRef.current.push(spawnTimeout);
+    };
+    scheduleSpawn();
+
     return () => {
       clearInterval(timer);
-      clearInterval(spawner);
+      clearInterval(difficultyTimer);
+      clearAllTimeouts();
     };
-  }, [running]);
+  }, [running, spawnTarget, clearAllTimeouts]);
 
   const start = () => {
+    clearAllTimeouts();
     setRunning(true);
     setScore(0);
     setTimeLeft(20);
     setTargets([]);
+    setSplashes([]);
   };
 
-  const shootWeb = (id: number) => {
+  const stopGame = () => {
+    clearAllTimeouts();
+    setRunning(false);
+    setTimeLeft(20);
+    setScore(0);
+    setTargets([]);
+    setSplashes([]);
+  };
+
+  const shootWeb = useCallback((id: number, x: number, y: number, points: number) => {
     initAudio();
     playNote(720, 0.12, 'block');
-    setScore(prev => prev + 1);
+    setScore(prev => prev + points);
     setTargets(prev => prev.filter(target => target.id !== id));
-  };
+    const splashId = Date.now() + Math.random();
+    setSplashes(prev => [...prev, { id: splashId, x, y, text: points >= 2 ? '+2' : '+1' }]);
+    addTimeout(() => {
+      setSplashes(prev => prev.filter(s => s.id !== splashId));
+    }, 500);
+  }, [initAudio, playNote, addTimeout]);
 
   return (
     <div className="text-center">
@@ -654,23 +1044,30 @@ function SpiderManWebGame({ playNote, initAudio }: { playNote: (freq: number, du
           <button onClick={start} className="px-6 py-3 rounded-full bg-gradient-to-r from-red-500 to-blue-500 font-bold hover:scale-105 transition">Play Again</button>
         </div>
       ) : (
-        <div className="relative h-72 rounded-3xl overflow-hidden border border-white/10 bg-gradient-to-b from-sky-500 via-blue-700 to-slate-900">
+        <div className="relative h-80 rounded-3xl overflow-hidden border border-white/10 bg-gradient-to-b from-sky-500 via-blue-700 to-slate-900">
           <div className="absolute inset-x-0 bottom-0 h-16 bg-[linear-gradient(90deg,rgba(255,255,255,0.2)_0_12px,transparent_12px_24px)] opacity-25" />
           <div className="absolute inset-x-0 top-4 text-center text-white/70 text-sm">Tap the bad guys before they escape the skyline.</div>
           {targets.map(target => (
-              <button
+            <button
               key={target.id}
-              onTouchStart={(e) => { e.preventDefault(); shootWeb(target.id); }}
-              onClick={() => shootWeb(target.id)}
-              className="absolute -translate-x-1/2 -translate-y-1/2 w-16 h-16 md:w-[72px] md:h-[72px] rounded-full bg-white/15 backdrop-blur flex items-center justify-center text-4xl shadow-xl transition-transform hover:scale-110 active:scale-95 touch-none"
+              onTouchStart={(e) => { e.preventDefault(); shootWeb(target.id, target.x, target.y, target.points); }}
+              onClick={() => shootWeb(target.id, target.x, target.y, target.points)}
+              className="absolute -translate-x-1/2 -translate-y-1/2 w-[72px] h-[72px] rounded-full bg-white/15 backdrop-blur flex items-center justify-center text-4xl shadow-xl transition-transform hover:scale-110 active:scale-95 touch-none"
               style={{ left: `${target.x}%`, top: `${target.y}%`, touchAction: 'manipulation' }}
             >
               <span>{target.emoji}</span>
             </button>
           ))}
+          {splashes.map(s => (
+            <div key={s.id} className="absolute pointer-events-none flex flex-col items-center" style={{ left: `${s.x}%`, top: `${s.y}%`, transform: 'translate(-50%, -130%)' }}>
+              <span className="text-3xl">🕸️</span>
+              <span className="text-lg font-extrabold text-cyan-200 animate-bounce" style={{ textShadow: '0 0 8px rgba(0,200,255,0.8)' }}>{s.text}</span>
+            </div>
+          ))}
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 text-5xl">🕷️</div>
         </div>
       )}
+      {running && <button onClick={stopGame} className="mt-3 px-6 py-2 bg-red-500 rounded-full text-white font-bold">Stop</button>}
     </div>
   );
 }
@@ -678,12 +1075,21 @@ function SpiderManWebGame({ playNote, initAudio }: { playNote: (freq: number, du
 // ===== MONKEY BANANA GAME =====
 function MonkeyBananaGame() {
   const [running, setRunning] = useState(false);
+  const [gameOver, setGameOver] = useState(false);
   const [score, setScore] = useState(0);
   const [misses, setMisses] = useState(0);
   const [monkeyX, setMonkeyX] = useState(50);
-  const [bananas, setBananas] = useState<{ id: number; x: number; y: number; speed: number }[]>([]);
+  const [bananasSnapshot, setBananasSnapshot] = useState<{ id: number; x: number; y: number; speed: number }[]>([]);
+
+  const bananasRef = useRef<{ id: number; x: number; y: number; speed: number }[]>([]);
   const monkeyXRef = useRef(50);
+  const runningRef = useRef(false);
+  const lastFrameRef = useRef(0);
+  const spawnTimerRef = useRef(0);
+  const rafRef = useRef(0);
   const idRef = useRef(0);
+  const scoreRef = useRef(0);
+  const missesRef = useRef(0);
   const arenaRef = useRef<HTMLDivElement>(null);
 
   const moveMonkey = useCallback((percent: number) => {
@@ -692,58 +1098,98 @@ function MonkeyBananaGame() {
     setMonkeyX(next);
   }, []);
 
-  useEffect(() => {
-    if (!running) return;
-    const dropper = setInterval(() => {
-      setBananas(prev => {
-        let caught = 0;
-        let dropped = 0;
-        const next = prev.flatMap(item => {
-          const nextY = item.y + item.speed;
-          if (nextY >= 82) {
-            if (Math.abs(item.x - monkeyXRef.current) <= 14) {
-              caught += 1;
-            } else {
-              dropped += 1;
-            }
-            return [];
-          }
-          return [{ ...item, y: nextY }];
-        });
-        if (caught) setScore(current => current + caught);
-        if (dropped) setMisses(current => current + dropped);
-        return next;
-      });
-    }, 90);
-    const spawner = setInterval(() => {
-      idRef.current += 1;
-      setBananas(prev => [...prev.slice(-7), { id: idRef.current, x: Math.random() * 78 + 8, y: 2, speed: Math.random() * 2.2 + 2.4 }]);
-    }, 1000);
-    return () => {
-      clearInterval(dropper);
-      clearInterval(spawner);
-    };
-  }, [running]);
+  const gameLoop = useCallback((timestamp: number) => {
+    if (!runningRef.current) return;
 
-  useEffect(() => {
-    if (misses >= 5) {
-      setRunning(false);
+    if (lastFrameRef.current === 0) {
+      lastFrameRef.current = timestamp;
+      rafRef.current = requestAnimationFrame(gameLoop);
+      return;
     }
-  }, [misses]);
 
-  const start = () => {
-    setRunning(true);
+    const deltaTime = Math.min((timestamp - lastFrameRef.current) / 1000, 0.1);
+    lastFrameRef.current = timestamp;
+
+    spawnTimerRef.current += deltaTime;
+    if (spawnTimerRef.current >= 0.9 && bananasRef.current.length < 8) {
+      spawnTimerRef.current = 0;
+      idRef.current += 1;
+      bananasRef.current.push({
+        id: idRef.current,
+        x: Math.random() * 78 + 11,
+        y: 2,
+        speed: Math.random() * 40 + 80,
+      });
+    }
+
+    let caught = 0;
+    let dropped = 0;
+    const mx = monkeyXRef.current;
+    const nextBananas: typeof bananasRef.current = [];
+
+    for (const b of bananasRef.current) {
+      const nextY = b.y + b.speed * deltaTime;
+      if (nextY >= 72 && nextY <= 95 && Math.abs(b.x - mx) <= 16) {
+        caught += 1;
+      } else if (nextY > 95) {
+        dropped += 1;
+      } else {
+        nextBananas.push({ ...b, y: nextY });
+      }
+    }
+
+    bananasRef.current = nextBananas;
+
+    if (caught) {
+      scoreRef.current += caught;
+      setScore(scoreRef.current);
+    }
+    if (dropped) {
+      missesRef.current += dropped;
+      setMisses(missesRef.current);
+      if (missesRef.current >= 5) {
+        runningRef.current = false;
+        setRunning(false);
+        setGameOver(true);
+        setBananasSnapshot([]);
+        return;
+      }
+    }
+
+    setBananasSnapshot([...bananasRef.current]);
+    rafRef.current = requestAnimationFrame(gameLoop);
+  }, []);
+
+  useEffect(() => {
+    if (running) {
+      runningRef.current = true;
+      lastFrameRef.current = 0;
+      spawnTimerRef.current = 0;
+      rafRef.current = requestAnimationFrame(gameLoop);
+    }
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
+  }, [running, gameLoop]);
+
+  const start = useCallback(() => {
+    bananasRef.current = [];
+    scoreRef.current = 0;
+    missesRef.current = 0;
+    idRef.current = 0;
     setScore(0);
     setMisses(0);
-    setBananas([]);
+    setBananasSnapshot([]);
+    setGameOver(false);
     moveMonkey(50);
-  };
+    setRunning(true);
+  }, [moveMonkey]);
 
-  const moveFromClientX = (clientX: number) => {
+  const handleTouch = useCallback((clientX: number) => {
     if (!arenaRef.current) return;
     const rect = arenaRef.current.getBoundingClientRect();
     moveMonkey(((clientX - rect.left) / rect.width) * 100);
-  };
+  }, [moveMonkey]);
 
   return (
     <div className="text-center">
@@ -751,40 +1197,36 @@ function MonkeyBananaGame() {
         <span className="text-yellow-300">🍌 {score}</span>
         <span className={misses >= 3 ? 'text-red-300 animate-pulse' : 'text-white'}>💨 Misses {misses}/5</span>
       </div>
-      {!running && score === 0 && misses === 0 ? (
+      {!running && !gameOver ? (
         <button onClick={start} className="px-6 py-3 rounded-full bg-gradient-to-r from-lime-400 to-yellow-400 text-black font-bold hover:scale-105 transition">Start Banana Catch</button>
-      ) : !running ? (
+      ) : gameOver ? (
         <div>
           <div className="text-2xl font-bold text-green-300 mb-2">Monkey snack time finished!</div>
           <div className="text-white mb-4">You caught {score} bananas.</div>
           <button onClick={start} className="px-6 py-3 rounded-full bg-gradient-to-r from-lime-400 to-yellow-400 text-black font-bold hover:scale-105 transition">Play Again</button>
         </div>
       ) : (
-        <>
-          <div
-            ref={arenaRef}
-            className="relative h-72 rounded-3xl overflow-hidden border border-white/10 bg-gradient-to-b from-cyan-300 via-green-400 to-green-700 touch-none"
-            onMouseMove={(e) => moveFromClientX(e.clientX)}
-            onClick={(e) => moveFromClientX(e.clientX)}
-            onTouchStart={(e) => moveFromClientX(e.touches[0].clientX)}
-            onTouchMove={(e) => {
-              e.preventDefault();
-              moveFromClientX(e.touches[0].clientX);
-            }}
-          >
-            <div className="absolute inset-x-0 top-4 text-center text-black/70 text-sm font-medium">Move the monkey under the bananas.</div>
-            {bananas.map(item => (
-              <div key={item.id} className="absolute -translate-x-1/2 text-4xl" style={{ left: `${item.x}%`, top: `${item.y}%` }}>🍌</div>
-            ))}
-            <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-amber-900/50 to-transparent" />
-            <div className="absolute bottom-3 -translate-x-1/2 text-6xl transition-all duration-150" style={{ left: `${monkeyX}%` }}>🐵</div>
-          </div>
-          <div className="flex justify-center gap-3 mt-4">
-            <button onClick={() => moveMonkey(monkeyX - 10)} className="px-4 py-2 rounded-full bg-black/20 font-bold">⬅️</button>
-            <button onClick={() => moveMonkey(monkeyX + 10)} className="px-4 py-2 rounded-full bg-black/20 font-bold">➡️</button>
-          </div>
-        </>
+        <div
+          ref={arenaRef}
+          className="relative h-80 rounded-3xl overflow-hidden border border-white/10 bg-gradient-to-b from-cyan-400 via-green-500 to-green-800 touch-none cursor-none"
+          onMouseMove={(e) => handleTouch(e.clientX)}
+          onTouchStart={(e) => { e.preventDefault(); handleTouch(e.touches[0].clientX); }}
+          onTouchMove={(e) => { e.preventDefault(); handleTouch(e.touches[0].clientX); }}
+        >
+          <div className="absolute inset-x-0 top-3 text-center text-white/80 text-sm font-medium drop-shadow">Move finger or mouse to catch bananas!</div>
+          {bananasSnapshot.map(item => (
+            <div
+              key={item.id}
+              className="absolute -translate-x-1/2 text-3xl"
+              style={{ left: `${item.x}%`, top: `${item.y}%`, transform: `translateX(-50%) rotate(${(item.x % 30) - 15}deg)` }}
+            >🍌</div>
+          ))}
+          <div className="absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-amber-900/60 via-green-900/30 to-transparent" />
+          <div className="absolute inset-x-0 bottom-0 h-4 bg-green-900/50" />
+          <div className="absolute -translate-x-1/2 -translate-y-1/2 text-5xl transition-[left] duration-75" style={{ left: `${monkeyX}%`, top: '84%' }}>🐵</div>
+        </div>
       )}
+      {running && <button onClick={() => { runningRef.current = false; setRunning(false); setGameOver(true); setBananasSnapshot([]); }} className="mt-3 px-6 py-2 bg-red-500 rounded-full text-white font-bold">Stop</button>}
     </div>
   );
 }
@@ -794,9 +1236,11 @@ function DrawingCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [drawing, setDrawing] = useState(false);
   const lastPoint = useRef<{ x: number; y: number } | null>(null);
-  const [color, setColor] = useState('#000000');
+  const [color, setColor] = useState('#ff69b4');
   const [brushSize, setBrushSize] = useState(6);
-  const [tool, setTool] = useState<'brush' | 'eraser'>('brush');
+  const [tool, setTool] = useState<'brush' | 'eraser' | 'stamp'>('brush');
+  const [stamp, setStamp] = useState('⭐');
+  const historyRef = useRef<ImageData[]>([]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -805,7 +1249,25 @@ function DrawingCanvas() {
     if (!ctx) return;
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+    historyRef.current = [ctx.getImageData(0, 0, canvas.width, canvas.height)];
   }, []);
+
+  const saveState = () => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+    historyRef.current.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+    if (historyRef.current.length > 30) historyRef.current.shift();
+  };
+
+  const undo = () => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx || historyRef.current.length <= 1) return;
+    historyRef.current.pop();
+    const prev = historyRef.current[historyRef.current.length - 1];
+    ctx.putImageData(prev, 0, 0);
+  };
 
   const getPos = (e: React.MouseEvent | React.TouchEvent) => {
     const canvas = canvasRef.current;
@@ -823,12 +1285,26 @@ function DrawingCanvas() {
     };
   };
 
+  const placeStamp = (pos: { x: number; y: number }) => {
+    const ctx = canvasRef.current?.getContext('2d');
+    if (!ctx) return;
+    ctx.font = `${brushSize * 5}px serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(stamp, pos.x, pos.y);
+  };
+
   const start = (e: React.MouseEvent | React.TouchEvent) => {
     e.preventDefault();
+    const pos = getPos(e);
+    if (tool === 'stamp') {
+      placeStamp(pos);
+      saveState();
+      return;
+    }
     setDrawing(true);
     const ctx = canvasRef.current?.getContext('2d');
     if (ctx) {
-      const pos = getPos(e);
       ctx.strokeStyle = tool === 'eraser' ? '#ffffff' : color;
       ctx.lineWidth = brushSize;
       ctx.lineCap = 'round';
@@ -850,7 +1326,7 @@ function DrawingCanvas() {
     ctx.moveTo(from.x, from.y);
     ctx.lineTo(pos.x, pos.y);
     ctx.strokeStyle = tool === 'eraser' ? '#ffffff' : color;
-    ctx.lineWidth = brushSize;
+    ctx.lineWidth = tool === 'eraser' ? brushSize * 3 : brushSize;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.stroke();
@@ -859,6 +1335,7 @@ function DrawingCanvas() {
 
   const end = (e?: React.MouseEvent | React.TouchEvent) => {
     if (e) e.preventDefault();
+    if (drawing) saveState();
     setDrawing(false);
     lastPoint.current = null;
   };
@@ -868,6 +1345,7 @@ function DrawingCanvas() {
     if (ctx && canvasRef.current) {
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+      saveState();
     }
   };
 
@@ -880,65 +1358,87 @@ function DrawingCanvas() {
     link.click();
   };
 
-  const colors = ['#000000', '#ff69b4', '#ff3b30', '#ff9500', '#ffd60a', '#34c759', '#00c7be', '#0a84ff', '#8e44ad', '#6b4f2c'];
+  const colors = ['#000000', '#ffffff', '#ff69b4', '#ff3b30', '#ff9500', '#ffd60a', '#34c759', '#00c7be', '#0a84ff', '#8e44ad', '#6b4f2c', '#ff6ec7'];
+  const stamps = ['⭐', '❤️', '🌈', '🦋', '🌸', '⚡', '🎵', '🕷️', '🐵', '🍌'];
+  const brushSizes = [
+    { size: 3, label: '·' },
+    { size: 6, label: '•' },
+    { size: 12, label: '●' },
+    { size: 20, label: '⬤' },
+  ];
+
   return (
     <div className="text-center">
-      <div className="flex flex-wrap justify-center gap-2 mb-4">
+      {/* Color palette */}
+      <div className="flex flex-wrap justify-center gap-1.5 mb-3">
         {colors.map(c => (
-          <button
-            key={c}
-            onClick={() => { setColor(c); setTool('brush'); }}
-            className={`w-9 h-9 rounded-full border-2 ${color === c && tool === 'brush' ? 'border-yellow-300 scale-110' : 'border-white/20'} transition`}
-            style={{ backgroundColor: c }}
-          />
+          <button key={c} onClick={() => { setColor(c); setTool('brush'); }}
+            className={`w-8 h-8 rounded-full border-2 transition-all ${color === c && tool === 'brush' ? 'border-yellow-300 scale-125 shadow-lg shadow-yellow-300/50' : 'border-white/20 hover:scale-110'}`}
+            style={{ backgroundColor: c }} />
         ))}
       </div>
-      <div className="flex flex-wrap justify-center gap-2 mb-4">
-        {[4, 8, 14].map(size => (
-          <button
-            key={size}
-            onClick={() => setBrushSize(size)}
-            className={`px-3 py-2 rounded-full font-bold ${brushSize === size ? 'bg-yellow-400 text-black' : 'bg-white/10 text-white'}`}
-          >
-            {size}px
+      {/* Tools row */}
+      <div className="flex flex-wrap justify-center gap-1.5 mb-3">
+        {brushSizes.map(b => (
+          <button key={b.size} onClick={() => { setBrushSize(b.size); if (tool === 'stamp') setTool('brush'); }}
+            className={`w-9 h-9 rounded-full font-bold flex items-center justify-center transition-all ${brushSize === b.size && tool !== 'stamp' ? 'bg-yellow-400 text-black scale-110' : 'bg-white/10 text-white hover:bg-white/20'}`}>
+            {b.label}
           </button>
         ))}
-        <button onClick={() => setTool('brush')} className={`px-3 py-2 rounded-full font-bold ${tool === 'brush' ? 'bg-pink-500' : 'bg-white/10'}`}>🖌️ Brush</button>
-        <button onClick={() => setTool('eraser')} className={`px-3 py-2 rounded-full font-bold ${tool === 'eraser' ? 'bg-cyan-500 text-black' : 'bg-white/10'}`}>🧽 Eraser</button>
+        <div className="w-px h-9 bg-white/20 mx-1" />
+        <button onClick={() => setTool('brush')} className={`px-3 py-1.5 rounded-full font-bold text-sm transition-all ${tool === 'brush' ? 'bg-pink-500 scale-105' : 'bg-white/10 hover:bg-white/20'}`}>🖌️</button>
+        <button onClick={() => setTool('eraser')} className={`px-3 py-1.5 rounded-full font-bold text-sm transition-all ${tool === 'eraser' ? 'bg-cyan-500 text-black scale-105' : 'bg-white/10 hover:bg-white/20'}`}>🧽</button>
+        <button onClick={() => setTool('stamp')} className={`px-3 py-1.5 rounded-full font-bold text-sm transition-all ${tool === 'stamp' ? 'bg-purple-500 scale-105' : 'bg-white/10 hover:bg-white/20'}`}>🎨</button>
       </div>
-      <canvas ref={canvasRef} width={340} height={260} className="bg-white rounded-2xl mx-auto cursor-crosshair touch-none w-full max-w-[340px] shadow-lg"
+      {/* Stamp picker (shown when stamp tool active) */}
+      {tool === 'stamp' && (
+        <div className="flex flex-wrap justify-center gap-1.5 mb-3">
+          {stamps.map(s => (
+            <button key={s} onClick={() => setStamp(s)}
+              className={`w-10 h-10 rounded-xl text-xl flex items-center justify-center transition-all ${stamp === s ? 'bg-purple-500 scale-110 ring-2 ring-purple-300' : 'bg-white/10 hover:bg-white/20'}`}>
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+      {/* Canvas */}
+      <canvas ref={canvasRef} width={480} height={360}
+        className="bg-white rounded-2xl mx-auto cursor-crosshair touch-none w-full max-w-[480px] shadow-xl shadow-black/30 border-2 border-white/20"
         onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end}
         onTouchStart={start} onTouchMove={move} onTouchEnd={end} />
-      <div className="mt-4 flex flex-wrap justify-center gap-3">
-        <button onClick={clear} className="px-5 py-2 bg-red-500 rounded-full text-white font-bold">🗑️ Clear</button>
-        <button onClick={save} className="px-5 py-2 bg-green-500 rounded-full text-white font-bold">💾 Save</button>
+      {/* Action buttons */}
+      <div className="mt-4 flex flex-wrap justify-center gap-2">
+        <button onClick={undo} className="px-4 py-2 bg-orange-500 rounded-full text-white font-bold hover:scale-105 transition">↩️ Undo</button>
+        <button onClick={clear} className="px-4 py-2 bg-red-500 rounded-full text-white font-bold hover:scale-105 transition">🗑️ Clear</button>
+        <button onClick={save} className="px-4 py-2 bg-green-500 rounded-full text-white font-bold hover:scale-105 transition">💾 Save</button>
       </div>
     </div>
   );
 }
 
 // ===== MAIN HOME =====
+const SECTION_IDS = ['hero', 'about', 'food', 'kpop', 'music', 'taekwondo', 'pokemon', 'artwork', 'spiderman', 'pikachu', 'games', 'art', 'dreams'];
 export default function Home() {
   const [loading, setLoading] = useState(true);
   const [activeSection, setActiveSection] = useState(0);
   const [showPiano, setShowPiano] = useState(false);
   const [pokeEffect, setPokeEffect] = useState<{ type: string; x: number; y: number } | null>(null);
   const sparkles = useSparkles(30);
-  const sectionIds = ['hero', 'about', 'food', 'kpop', 'music', 'taekwondo', 'pokemon', 'artwork', 'spiderman', 'pikachu', 'games', 'art', 'dreams'];
-  const { playNote, playMelody, sodaPopMelody, goldenMelody, initAudio } = useAudio();
+  const { playNote, playMelody, playSoundClip, sodaPopMelody, goldenMelody, initAudio, stopAllSounds } = useAudio();
 
-  const triggerPokeEffect = (type: string, e: React.MouseEvent) => {
-    initAudio(); // iOS audio init
+  const triggerPokeEffect = (type: string, e: React.MouseEvent, pokemonName?: string) => {
+    initAudio();
     setPokeEffect({ type, x: e.clientX, y: e.clientY });
-    const freqs: Record<string, number> = { Electric: 800, Fire: 300, Water: 600, Grass: 400, Normal: 500, Fairy: 900, 'Fire/Flying': 350, Psychic: 700 };
-    playNote(freqs[type] || 500, 0.3, 'punch');
+    if (pokemonName) {
+      playSoundClip(`/sounds/pokemon/${pokemonName.toLowerCase()}.mp3`, 5);
+    }
   };
 
   useEffect(() => {
     const obs = new IntersectionObserver((entries) => {
-      entries.forEach(e => { if (e.isIntersecting) { const i = sectionIds.indexOf(e.target.id); if (i >= 0) setActiveSection(i); } });
+      entries.forEach(e => { if (e.isIntersecting) { const i = SECTION_IDS.indexOf(e.target.id); if (i >= 0) setActiveSection(i); } });
     }, { threshold: 0.3 });
-    sectionIds.forEach(id => { const el = document.getElementById(id); if (el) obs.observe(el); });
+    SECTION_IDS.forEach(id => { const el = document.getElementById(id); if (el) obs.observe(el); });
     
     // iOS audio warm-up on first touch
     const warmAudio = () => { initAudio(); };
@@ -950,6 +1450,7 @@ export default function Home() {
       document.removeEventListener('touchstart', warmAudio);
       document.removeEventListener('touchend', warmAudio);
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (loading) return <LoadingScreen onFinish={() => setLoading(false)} />;
@@ -958,7 +1459,7 @@ export default function Home() {
     <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 text-white overflow-x-hidden">
       <CustomCursor />
       <ScrollProgress />
-      <NavDots sections={sectionIds} active={activeSection} />
+      <NavDots sections={SECTION_IDS} active={activeSection} />
       {sparkles.map((s, i) => <Sparkle key={i} style={s} />)}
 
       {/* HERO */}
@@ -971,15 +1472,20 @@ export default function Home() {
         <FloatingEmoji emoji="⭐" delay={0.3} left="5%" />
         <FloatingEmoji emoji="💫" delay={0.8} left="85%" />
         <FloatingEmoji emoji="🌟" delay={1.2} left="15%" />
-        <div className="text-center z-10">
-          <h1 className="text-5xl md:text-7xl font-bold mb-6 bg-gradient-to-r from-yellow-300 via-pink-400 to-purple-400 bg-clip-text text-transparent animate-pulse">
-            ✨ Welcome to Jayden&apos;s World ✨
-          </h1>
-          <p className="text-xl md:text-2xl mb-8 text-purple-200">I&apos;m Jayden — a 4-year-old superhero from Hong Kong! 🇭🇰</p>
-          <p className="text-lg mb-8 text-pink-300">I love Pokémon ⚡, Spider-Man 🕷️, music 🎵, taekwondo 🥋, and K-pop 🎤</p>
-          <a href="#about" className="px-10 py-4 bg-gradient-to-r from-pink-500 via-purple-500 to-blue-500 rounded-full text-xl font-bold hover:scale-110 transition-all duration-300 shadow-lg shadow-pink-500/50 inline-block magnetic-btn">
-            🚀 Start the Adventure!
-          </a>
+        <div className="flex flex-col md:flex-row items-center gap-8 z-10">
+          <div className="relative w-48 h-80 md:w-56 md:h-96 flex-shrink-0">
+            <Image src="/images/jay.jpg" alt="Jayden" fill className="object-contain drop-shadow-[0_0_30px_rgba(236,72,153,0.5)] hover:scale-105 transition-transform duration-500" priority />
+          </div>
+          <div className="text-center md:text-left">
+            <h1 className="text-5xl md:text-7xl font-bold mb-6 bg-gradient-to-r from-yellow-300 via-pink-400 to-purple-400 bg-clip-text text-transparent animate-pulse">
+              ✨ Welcome to Jayden&apos;s World ✨
+            </h1>
+            <p className="text-xl md:text-2xl mb-8 text-purple-200">I&apos;m Jayden — a 4-year-old superhero from Hong Kong! 🇭🇰</p>
+            <p className="text-lg mb-8 text-pink-300">I love Pokémon ⚡, Spider-Man 🕷️, music 🎵, taekwondo 🥋, and K-pop 🎤</p>
+            <a href="#about" className="px-10 py-4 bg-gradient-to-r from-pink-500 via-purple-500 to-blue-500 rounded-full text-xl font-bold hover:scale-110 transition-all duration-300 shadow-lg shadow-pink-500/50 inline-block magnetic-btn">
+              🚀 Start the Adventure!
+            </a>
+          </div>
         </div>
       </section>
 
@@ -1088,19 +1594,25 @@ export default function Home() {
                 { freq: 523.25, dur: 0.28 }, { freq: 493.88, dur: 0.3 }, { freq: 440.0, dur: 0.34 }, { freq: 392.0, dur: 0.3 },
                 { freq: 349.23, dur: 0.5 },
               ]},
-              { icon: '🎹', name: 'Piano', desc: '32 keys to play!', status: 'Practicing', color: 'from-purple-500 to-pink-600', isPiano: true, melody: [
+              { icon: '🎹', name: 'Piano', desc: '32 keys to play!', status: 'Practicing', color: 'from-purple-500 to-pink-600', isPiano: true, instrument: 'piano' as const, melody: [
                 { freq: 261.63, dur: 0.3 }, { freq: 329.63, dur: 0.3 }, { freq: 392.0, dur: 0.4 },
                 { freq: 523.25, dur: 0.3 }, { freq: 392.0, dur: 0.3 }, { freq: 329.63, dur: 0.5 },
               ]},
             ].map((item, i) => (
               <TiltCard key={i}>
                 <div className={`p-6 rounded-3xl bg-gradient-to-br ${item.color} text-center shadow-xl cursor-pointer group`}
-                     onClick={() => { initAudio(); (item as any).isPiano ? setShowPiano(true) : playMelody(item.melody, 220, item.instrument); }}>
+                     onClick={() => { initAudio(); stopAllSounds(); playMelody(item.melody, 220, item.instrument); }}>
                   <div className="text-6xl mb-4">{item.icon}</div>
                   <h3 className="text-2xl font-bold mb-2">{item.name}</h3>
                   <p className="text-white/80 mb-3">{item.desc}</p>
                   <span className="px-4 py-1 bg-white/20 rounded-full text-sm">{item.status}</span>
                   <p className="text-xs mt-2 text-white/50">🎵 Click to play!</p>
+                  {(item as any).isPiano && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); initAudio(); stopAllSounds(); setShowPiano(true); }}
+                      className="mt-3 px-5 py-2 bg-white/25 hover:bg-white/40 rounded-full text-sm font-semibold transition-all hover:scale-105 backdrop-blur-sm border border-white/20"
+                    >🎹 Open Virtual Piano</button>
+                  )}
                 </div>
               </TiltCard>
             ))}
@@ -1115,16 +1627,16 @@ export default function Home() {
           <p className="text-center text-orange-200 mb-12 text-lg">Power, discipline, and awesome kicks!</p>
           <div className="flex justify-center items-center gap-4 mb-12">
             {[
-              { belt: 'White', color: 'bg-gray-100', active: false },
-              { belt: 'Yellow', color: 'bg-yellow-400', active: true },
-              { belt: 'Green', color: 'bg-green-500', active: false },
-              { belt: 'Blue', color: 'bg-blue-500', active: false },
-              { belt: 'Red', color: 'bg-red-500', active: false },
-              { belt: 'Black', color: 'bg-gray-900', active: false },
+              { belt: 'White', color: 'bg-gray-100', active: true, next: false },
+              { belt: 'Yellow', color: 'bg-yellow-400', active: false, next: true },
+              { belt: 'Green', color: 'bg-green-500', active: false, next: false },
+              { belt: 'Blue', color: 'bg-blue-500', active: false, next: false },
+              { belt: 'Red', color: 'bg-red-500', active: false, next: false },
+              { belt: 'Black', color: 'bg-gray-900', active: false, next: false },
             ].map((item, i) => (
               <div key={i} className="flex flex-col items-center">
-                <div className={`w-8 h-12 rounded ${item.color} ${item.active ? 'ring-4 ring-yellow-300 scale-125' : 'opacity-50'} transition-all`} />
-                <span className="text-xs mt-2 text-white/70">{item.belt}</span>
+                <div className={`w-8 h-12 rounded ${item.color} ${item.active ? 'ring-4 ring-white scale-125 shadow-lg shadow-white/40' : item.next ? 'opacity-70 ring-2 ring-yellow-300/50 animate-pulse' : 'opacity-30'} transition-all`} />
+                <span className={`text-xs mt-2 ${item.active ? 'text-white font-bold' : item.next ? 'text-yellow-300/80' : 'text-white/50'}`}>{item.belt}{item.next ? ' ⬆️' : ''}</span>
               </div>
             ))}
           </div>
@@ -1165,13 +1677,13 @@ export default function Home() {
             ].map((item, i) => (
               <TiltCard key={i}>
                 <div className={`p-4 rounded-2xl bg-gradient-to-br ${item.color} shadow-lg cursor-pointer group`}
-                     onClick={(e) => triggerPokeEffect(item.type, e)}>
+                     onClick={(e) => triggerPokeEffect(item.type, e, item.name)}>
                   <div className="relative w-full aspect-square mb-2">
                     <Image src={`/images/pokemon/${item.file}`} alt={item.name} fill className="object-contain drop-shadow-xl group-hover:scale-110 transition-transform" />
                   </div>
                   <div className="text-center">
                     <div className="font-bold">{item.name}</div>
-                    <div className="text-xs opacity-80">{item.type} ⚡</div>
+                    <div className="text-xs opacity-80">{item.type} · Tap to hear!</div>
                   </div>
                 </div>
               </TiltCard>
@@ -1203,18 +1715,28 @@ export default function Home() {
       <RevealSection><section id="spiderman" className="py-20 px-4 bg-gradient-to-b from-transparent via-red-800/20 to-transparent">
         <div className="max-w-4xl mx-auto">
           <h2 className="text-4xl md:text-5xl font-bold text-center mb-12 bg-gradient-to-r from-red-400 to-blue-400 bg-clip-text text-transparent">🕷️ Spider-Man Heroes 🕷️</h2>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
-            {[1, 2, 3, 4, 5].map(i => (
-              <TiltCard key={i}>
-                <div className="p-4 rounded-2xl bg-gradient-to-br from-red-600/30 to-blue-800/30 backdrop-blur shadow-xl cursor-pointer group">
+          <div className="flex flex-wrap justify-center gap-6">
+            {[
+              { id: 1, name: 'Spider-Man', sound: '/sounds/spiderman/spiderman-sound.mp3', quote: '🕸️ Thwip!' },
+              { id: 2, name: 'Spider-Man 2099', sound: '/sounds/spiderman/rizzing.mp3', quote: '⚡ Shocking!' },
+              { id: 3, name: 'Green Goblin', sound: '/sounds/spiderman/green-goblin.mp3', quote: '💚 Spider-Man!' },
+              { id: 4, name: 'J. Jonah Jameson', sound: '/sounds/spiderman/boss-laugh.mp3', quote: '😂 Ha ha ha!' },
+              { id: 5, name: 'Electro Battle', sound: '/sounds/spiderman/falling.mp3', quote: '💥 Aaaargh!' },
+            ].map(item => (
+              <TiltCard key={item.id}>
+                <div className="w-[calc(50vw-2rem)] md:w-56 p-4 rounded-2xl bg-gradient-to-br from-red-600/30 to-blue-800/30 backdrop-blur shadow-xl cursor-pointer group relative overflow-hidden"
+                     onClick={() => { initAudio(); playSoundClip(item.sound, 5); }}>
                   <div className="relative w-full aspect-square">
-                    <Image src={`/images/spiderman/spiderman_${i}.png`} alt={`Spider-Man ${i}`} fill className="object-contain drop-shadow-2xl group-hover:scale-110 transition-transform" />
+                    <Image src={`/images/spiderman/spiderman_${item.id}.png`} alt={item.name} fill className="object-contain drop-shadow-2xl group-hover:scale-110 transition-transform" />
                   </div>
+                  <p className="text-center text-sm font-bold mt-2 text-white/80">{item.name}</p>
+                  <p className="text-center text-xs text-white/50 mt-1">{item.quote} Tap to hear!</p>
+                  <div className="absolute inset-0 bg-gradient-to-t from-red-500/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity rounded-2xl pointer-events-none" />
                 </div>
               </TiltCard>
             ))}
           </div>
-          <p className="text-center text-red-200 mt-6 text-lg">Your friendly neighborhood hero! 🕸️</p>
+          <p className="text-center text-red-200 mt-6 text-lg">Your friendly neighborhood hero! 🕸️ Click each one!</p>
         </div>
       </section></RevealSection>
 
@@ -1277,10 +1799,13 @@ export default function Home() {
       <footer className="py-12 text-center text-purple-300">
         <p className="text-lg">Made with ❤️ for Jayden — The Little Superhero</p>
         <p className="text-sm mt-2 opacity-60">⚡ Keep being amazing! ⚡</p>
+        <button onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })} className="mt-6 px-6 py-3 bg-gradient-to-r from-pink-500 to-purple-500 rounded-full text-white font-bold hover:scale-110 transition-all shadow-lg shadow-pink-500/30">
+          🚀 Back to Top!
+        </button>
       </footer>
 
       {/* PIANO POPUP */}
-      {showPiano && <PianoKeyboard onClose={() => setShowPiano(false)} playNote={playNote} initAudio={initAudio} />}
+      {showPiano && <PianoKeyboard onClose={() => { setShowPiano(false); stopAllSounds(); }} playNote={playNote} initAudio={initAudio} stopAllSounds={stopAllSounds} />}
 
       {/* POKEMON EFFECT */}
       {pokeEffect && <PokemonEffect type={pokeEffect.type} x={pokeEffect.x} y={pokeEffect.y} onDone={() => setPokeEffect(null)} />}
