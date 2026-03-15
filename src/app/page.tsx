@@ -8,6 +8,84 @@ type InstrumentName = 'piano' | 'clarinet' | 'recorder' | 'kick' | 'punch' | 'bl
 type NoteEvent = { freq: number; dur: number };
 type PianoKey = { note: string; freq: number; white: boolean; black: boolean; whiteIndex: number };
 type StarItem = { id: number; x: number; y: number; size: number; bornAt: number; fading: boolean };
+type AboutCard = { icon?: string; title: string; value: string; color: string; isFlag?: boolean };
+type FoodCard = { name: string; emoji: string; desc: string; color: string; isSiuMai?: boolean };
+type MusicCard = {
+  icon: string;
+  name: string;
+  desc: string;
+  status: string;
+  color: string;
+  instrument: 'piano' | 'clarinet' | 'recorder';
+  melody: NoteEvent[];
+  isPiano?: boolean;
+};
+
+const ABOUT_CARDS: AboutCard[] = [
+  { icon: '🎂', title: 'Age', value: '4 Years Old', color: 'from-pink-500 to-rose-500' },
+  { title: 'Born', value: 'Hong Kong', color: 'from-blue-500 to-cyan-500', isFlag: true },
+  { icon: '⚡', title: 'Superpower', value: 'Being Awesome!', color: 'from-yellow-500 to-orange-500' },
+  { icon: '🏃', title: 'Personality', value: 'Active & Energetic', color: 'from-green-500 to-emerald-500' },
+  { icon: '😄', title: 'Vibe', value: 'Outgoing & Confident', color: 'from-purple-500 to-violet-500' },
+  { icon: '💪', title: 'Special', value: 'Super Handsome', color: 'from-red-500 to-pink-500' },
+];
+
+const FOOD_CARDS: FoodCard[] = [
+  { name: 'Siu Mai', emoji: '', desc: 'Dim sum champion!', color: 'from-orange-400 to-red-500', isSiuMai: true },
+  { name: 'French Fries', emoji: '🍟', desc: 'Crispy & golden!', color: 'from-yellow-400 to-amber-500' },
+  { name: 'Chicken', emoji: '🍗', desc: 'Yummy & juicy!', color: 'from-amber-400 to-orange-500' },
+  { name: 'Fish Stick', emoji: '🐟', desc: 'Ocean goodness!', color: 'from-blue-400 to-cyan-500' },
+];
+
+const MUSIC_CARDS: MusicCard[] = [
+  {
+    icon: '🎵',
+    name: 'Clarinet',
+    desc: 'My jazzy friend!',
+    status: 'Learning',
+    color: 'from-blue-500 to-indigo-600',
+    instrument: 'clarinet',
+    melody: [
+      { freq: 261.63, dur: 0.32 }, { freq: 293.66, dur: 0.28 }, { freq: 329.63, dur: 0.34 }, { freq: 392.0, dur: 0.45 },
+      { freq: 349.23, dur: 0.3 }, { freq: 329.63, dur: 0.28 }, { freq: 293.66, dur: 0.3 }, { freq: 392.0, dur: 0.48 },
+      { freq: 440.0, dur: 0.36 }, { freq: 392.0, dur: 0.5 },
+    ],
+  },
+  {
+    icon: '🎶',
+    name: 'Recorder',
+    desc: 'My first instrument!',
+    status: 'Playing',
+    color: 'from-green-500 to-teal-600',
+    instrument: 'recorder',
+    melody: [
+      { freq: 523.25, dur: 0.28 }, { freq: 587.33, dur: 0.28 }, { freq: 659.25, dur: 0.34 }, { freq: 587.33, dur: 0.28 },
+      { freq: 523.25, dur: 0.28 }, { freq: 493.88, dur: 0.3 }, { freq: 440.0, dur: 0.34 }, { freq: 392.0, dur: 0.3 },
+      { freq: 349.23, dur: 0.5 },
+    ],
+  },
+  {
+    icon: '🎹',
+    name: 'Piano',
+    desc: '32 keys to play!',
+    status: 'Practicing',
+    color: 'from-purple-500 to-pink-600',
+    instrument: 'piano',
+    isPiano: true,
+    melody: [
+      { freq: 261.63, dur: 0.3 }, { freq: 329.63, dur: 0.3 }, { freq: 392.0, dur: 0.4 },
+      { freq: 523.25, dur: 0.3 }, { freq: 392.0, dur: 0.3 }, { freq: 329.63, dur: 0.5 },
+    ],
+  },
+];
+
+function useSafeStateRef<T>(value: T) {
+  const ref = useRef(value);
+  useEffect(() => {
+    ref.current = value;
+  }, [value]);
+  return ref;
+}
 
 // ===== AUDIO ENGINE (Web Audio API - iOS compatible) =====
 // iOS Safari rule: AudioContext MUST be created/resumed inside a direct user gesture.
@@ -23,9 +101,6 @@ function useAudio() {
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const activeOscillatorsRef = useRef<OscillatorNode[]>([]);
   const melodyTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
-
-  // Base frequencies of each sample (the root pitch recorded in the MP3)
-  const SAMPLE_BASE: Record<string, number> = { piano: 261.63, clarinet: 261.63, recorder: 261.63, kick: 0, punch: 0, block: 0 };
 
   const loadSample = useCallback(async (instrument: string, ctx: AudioContext): Promise<AudioBuffer | null> => {
     if (sampleCacheRef.current[instrument]) return sampleCacheRef.current[instrument];
@@ -63,13 +138,13 @@ function useAudio() {
 
   const getAudioContext = useCallback(() => {
     try {
-      const AC = window.AudioContext || (window as any).webkitAudioContext;
+      const AC = window.AudioContext || ('webkitAudioContext' in window ? window.webkitAudioContext : undefined);
       if (!AC) return null;
       if (!ctxRef.current) {
         ctxRef.current = new AC();
       }
       return ctxRef.current;
-    } catch (_e) {
+    } catch {
       return null;
     }
   }, []);
@@ -94,7 +169,7 @@ function useAudio() {
       if (!ctx) return;
       // Unlock: resume + play a zero-gain buffer synchronously inside the gesture
       if (!unlockedRef.current || ctx.state === 'suspended' || ctx.state === 'interrupted') {
-        ctx.resume();
+        void ctx.resume().catch(() => undefined);
         const buf = ctx.createBuffer(1, 1, ctx.sampleRate);
         const src = ctx.createBufferSource();
         src.buffer = buf;
@@ -104,19 +179,19 @@ function useAudio() {
         src.start(0);
         unlockedRef.current = true;
       }
-    } catch (_e) {}
+    } catch {}
   }, [getAudioContext]);
 
   // Stop all currently playing sounds
   const stopAllSounds = useCallback(() => {
     // Stop buffer sources
     activeSourcesRef.current.forEach(src => {
-      try { src.stop(); } catch (_e) {}
+      try { src.stop(); } catch {}
     });
     activeSourcesRef.current = [];
     // Stop oscillator sources
     activeOscillatorsRef.current.forEach(osc => {
-      try { osc.stop(); } catch (_e) {}
+      try { osc.stop(); } catch {}
     });
     activeOscillatorsRef.current = [];
     // Clear melody timeouts
@@ -124,37 +199,176 @@ function useAudio() {
     melodyTimersRef.current = [];
   }, []);
 
-  // Realistic instrument synthesis (uses real MP3 samples for piano/clarinet/recorder)
+  const playSynthNote = useCallback((ctx: AudioContext, freq: number, duration: number, instrument: 'piano' | 'clarinet' | 'recorder') => {
+    const now = ctx.currentTime + 0.01;
+    const release = instrument === 'piano' ? 0.6 : instrument === 'clarinet' ? 0.35 : 0.42;
+    const end = now + Math.max(duration, 0.15) + release;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = instrument === 'piano' ? 2800 : instrument === 'clarinet' ? 1800 : 3400;
+    filter.Q.value = instrument === 'clarinet' ? 1.2 : 0.7;
+
+    const gainNode = ctx.createGain();
+    gainNode.gain.setValueAtTime(0.0001, now);
+
+    const attack = instrument === 'piano' ? 0.008 : 0.03;
+    const peak = instrument === 'piano' ? 0.35 : instrument === 'clarinet' ? 0.22 : 0.18;
+    const sustain = instrument === 'piano' ? 0.08 : instrument === 'clarinet' ? 0.14 : 0.11;
+    gainNode.gain.exponentialRampToValueAtTime(peak, now + attack);
+    gainNode.gain.exponentialRampToValueAtTime(sustain, now + Math.max(duration * 0.45, attack + 0.03));
+    gainNode.gain.setValueAtTime(sustain, now + duration);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, end);
+    filter.connect(gainNode).connect(ctx.destination);
+
+    const osc1 = ctx.createOscillator();
+    const osc2 = ctx.createOscillator();
+    const osc1Gain = ctx.createGain();
+    const osc2Gain = ctx.createGain();
+
+    if (instrument === 'piano') {
+      osc1.type = 'triangle';
+      osc2.type = 'sine';
+      osc1Gain.gain.value = 0.8;
+      osc2Gain.gain.value = 0.35;
+    } else if (instrument === 'clarinet') {
+      osc1.type = 'square';
+      osc2.type = 'sine';
+      osc1Gain.gain.value = 0.42;
+      osc2Gain.gain.value = 0.18;
+    } else {
+      osc1.type = 'sine';
+      osc2.type = 'triangle';
+      osc1Gain.gain.value = 0.5;
+      osc2Gain.gain.value = 0.14;
+    }
+
+    osc1.frequency.setValueAtTime(freq, now);
+    osc2.frequency.setValueAtTime(freq * (instrument === 'piano' ? 2 : 1.005), now);
+    if (instrument === 'piano') {
+      osc1.detune.setValueAtTime(-3, now);
+      osc2.detune.setValueAtTime(4, now);
+    }
+
+    osc1.connect(osc1Gain).connect(filter);
+    osc2.connect(osc2Gain).connect(filter);
+
+    if (instrument !== 'piano') {
+      const vibrato = ctx.createOscillator();
+      const vibratoGain = ctx.createGain();
+      vibrato.frequency.value = instrument === 'clarinet' ? 4.5 : 5.2;
+      vibratoGain.gain.value = instrument === 'clarinet' ? 6 : 9;
+      vibrato.connect(vibratoGain);
+      vibratoGain.connect(osc1.frequency);
+      vibratoGain.connect(osc2.frequency);
+      vibrato.start(now);
+      vibrato.stop(end);
+      activeOscillatorsRef.current.push(vibrato);
+      vibrato.onended = () => {
+        activeOscillatorsRef.current = activeOscillatorsRef.current.filter(activeOsc => activeOsc !== vibrato);
+      };
+    }
+
+    osc1.start(now);
+    osc2.start(now);
+    osc1.stop(end);
+    osc2.stop(end);
+    activeOscillatorsRef.current.push(osc1, osc2);
+    const cleanup = (osc: OscillatorNode) => {
+      activeOscillatorsRef.current = activeOscillatorsRef.current.filter(activeOsc => activeOsc !== osc);
+    };
+    osc1.onended = () => cleanup(osc1);
+    osc2.onended = () => cleanup(osc2);
+  }, []);
+
+  const playPercussionFallback = useCallback((ctx: AudioContext, instrument: 'kick' | 'punch' | 'block', duration: number) => {
+    const now = ctx.currentTime + 0.01;
+    const end = now + Math.max(duration, 0.18) + 0.22;
+
+    if (instrument === 'kick') {
+      const osc = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(150, now);
+      osc.frequency.exponentialRampToValueAtTime(42, now + 0.18);
+      gainNode.gain.setValueAtTime(0.9, now);
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
+      osc.connect(gainNode).connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.22);
+      activeOscillatorsRef.current.push(osc);
+      osc.onended = () => {
+        activeOscillatorsRef.current = activeOscillatorsRef.current.filter(activeOsc => activeOsc !== osc);
+      };
+      return;
+    }
+
+    const noise = ctx.createBufferSource();
+    noise.buffer = getNoiseBuffer(ctx);
+    const bandPass = ctx.createBiquadFilter();
+    bandPass.type = 'bandpass';
+    bandPass.frequency.value = instrument === 'punch' ? 720 : 1400;
+    bandPass.Q.value = 1.4;
+
+    const noiseGain = ctx.createGain();
+    noiseGain.gain.setValueAtTime(0.5, now);
+    noiseGain.gain.exponentialRampToValueAtTime(0.0001, end);
+
+    const tone = ctx.createOscillator();
+    tone.type = instrument === 'punch' ? 'triangle' : 'square';
+    tone.frequency.setValueAtTime(instrument === 'punch' ? 120 : 410, now);
+    tone.frequency.exponentialRampToValueAtTime(instrument === 'punch' ? 70 : 180, end);
+    const toneGain = ctx.createGain();
+    toneGain.gain.setValueAtTime(instrument === 'punch' ? 0.45 : 0.18, now);
+    toneGain.gain.exponentialRampToValueAtTime(0.0001, end);
+
+    noise.connect(bandPass).connect(noiseGain).connect(ctx.destination);
+    tone.connect(toneGain).connect(ctx.destination);
+    noise.start(now);
+    noise.stop(end);
+    tone.start(now);
+    tone.stop(end);
+
+    activeSourcesRef.current.push(noise);
+    activeOscillatorsRef.current.push(tone);
+    noise.onended = () => {
+      activeSourcesRef.current = activeSourcesRef.current.filter(src => src !== noise);
+    };
+    tone.onended = () => {
+      activeOscillatorsRef.current = activeOscillatorsRef.current.filter(activeOsc => activeOsc !== tone);
+    };
+  }, [getNoiseBuffer]);
+
   const playNote = useCallback((freq: number, duration: number, instrument: InstrumentName = 'piano') => {
     try {
       const ctx = getAudioContext();
       if (!ctx) return;
-      if (ctx.state !== 'running') ctx.resume();
+      if (ctx.state !== 'running') {
+        void ctx.resume().catch(() => undefined);
+      }
 
-      // --- Real sample playback ---
       const isTonal = instrument === 'piano' || instrument === 'clarinet' || instrument === 'recorder';
       const isCombat = instrument === 'kick' || instrument === 'punch' || instrument === 'block';
-      if (isTonal || isCombat) {
-        const baseFreq = SAMPLE_BASE[instrument] || 261.63;
-        const detuneCents = isTonal ? 1200 * Math.log2(freq / baseFreq) : 0;
+      if (isTonal) {
+        playSynthNote(ctx, freq, duration, instrument);
+        return;
+      }
+      if (isCombat) {
         loadSample(instrument, ctx).then(buf => {
-          if (!buf) return;
+          if (!buf) {
+            playPercussionFallback(ctx, instrument, duration);
+            return;
+          }
           const now = ctx.currentTime + 0.01;
           const src = ctx.createBufferSource();
           src.buffer = buf;
-          if (isTonal) src.detune.value = detuneCents;
           const gainNode = ctx.createGain();
-          gainNode.gain.setValueAtTime(0.85, now);
-          if (isTonal) {
-            gainNode.gain.setValueAtTime(0.85, now + duration);
-            gainNode.gain.exponentialRampToValueAtTime(0.0001, now + duration + 0.4);
-            src.connect(gainNode).connect(ctx.destination);
-            src.start(now);
-            src.stop(now + duration + 0.5);
-          } else {
-            src.connect(gainNode).connect(ctx.destination);
-            src.start(now);
-          }
+          const clipDuration = Math.min(buf.duration, Math.max(duration + 0.4, 0.7));
+          gainNode.gain.setValueAtTime(0.9, now);
+          gainNode.gain.setValueAtTime(0.9, now + Math.max(clipDuration - 0.15, 0.2));
+          gainNode.gain.exponentialRampToValueAtTime(0.0001, now + clipDuration);
+          src.connect(gainNode).connect(ctx.destination);
+          src.start(now);
+          src.stop(now + clipDuration);
           activeSourcesRef.current.push(src);
           src.onended = () => {
             activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== src);
@@ -162,8 +376,8 @@ function useAudio() {
         }).catch(() => {});
         return;
       }
-    } catch (e) { /* silent fail */ }
-  }, [getAudioContext, loadSample]);
+    } catch { /* silent fail */ }
+  }, [getAudioContext, loadSample, playPercussionFallback, playSynthNote]);
 
   // Play melody with instrument
   const playMelody = useCallback((notes: NoteEvent[], tempo: number = 200, instrument: 'piano' | 'clarinet' | 'recorder' = 'piano') => {
@@ -176,41 +390,14 @@ function useAudio() {
     });
   }, [playNote, stopAllSounds]);
 
-  // Longer kid-friendly melodic motifs inspired by the songs' energy.
-  const s = 0.24;
-  const sodaPopMelody: NoteEvent[] = [
-    { freq: 523.25, dur: s }, { freq: 659.25, dur: s * 0.85 }, { freq: 783.99, dur: s * 0.85 }, { freq: 880.0, dur: s },
-    { freq: 783.99, dur: s * 0.85 }, { freq: 659.25, dur: s * 0.85 }, { freq: 587.33, dur: s }, { freq: 523.25, dur: s * 1.5 },
-    { freq: 587.33, dur: s }, { freq: 659.25, dur: s }, { freq: 698.46, dur: s }, { freq: 783.99, dur: s * 1.15 },
-    { freq: 698.46, dur: s * 0.85 }, { freq: 659.25, dur: s * 0.85 }, { freq: 587.33, dur: s }, { freq: 523.25, dur: s * 1.4 },
-    { freq: 523.25, dur: s * 0.75 }, { freq: 587.33, dur: s * 0.75 }, { freq: 659.25, dur: s * 0.75 }, { freq: 783.99, dur: s },
-    { freq: 880.0, dur: s }, { freq: 783.99, dur: s }, { freq: 659.25, dur: s }, { freq: 587.33, dur: s * 1.1 },
-    { freq: 523.25, dur: s }, { freq: 659.25, dur: s * 0.85 }, { freq: 783.99, dur: s * 0.85 }, { freq: 987.77, dur: s * 1.2 },
-    { freq: 880.0, dur: s }, { freq: 783.99, dur: s }, { freq: 698.46, dur: s }, { freq: 659.25, dur: s * 1.2 },
-    { freq: 587.33, dur: s }, { freq: 659.25, dur: s }, { freq: 698.46, dur: s }, { freq: 783.99, dur: s },
-    { freq: 698.46, dur: s * 0.85 }, { freq: 659.25, dur: s * 0.85 }, { freq: 587.33, dur: s }, { freq: 523.25, dur: s * 1.8 },
-  ];
-
-  const g = 0.26;
-  const goldenMelody: NoteEvent[] = [
-    { freq: 440.0, dur: g }, { freq: 493.88, dur: g * 0.9 }, { freq: 523.25, dur: g * 0.9 }, { freq: 659.25, dur: g * 1.1 },
-    { freq: 587.33, dur: g * 0.9 }, { freq: 523.25, dur: g * 0.9 }, { freq: 493.88, dur: g }, { freq: 440.0, dur: g * 1.4 },
-    { freq: 440.0, dur: g * 0.8 }, { freq: 493.88, dur: g * 0.8 }, { freq: 523.25, dur: g * 0.8 }, { freq: 587.33, dur: g * 0.9 },
-    { freq: 659.25, dur: g * 1.2 }, { freq: 783.99, dur: g }, { freq: 659.25, dur: g }, { freq: 587.33, dur: g * 1.2 },
-    { freq: 523.25, dur: g }, { freq: 587.33, dur: g }, { freq: 659.25, dur: g }, { freq: 783.99, dur: g * 1.1 },
-    { freq: 880.0, dur: g * 1.1 }, { freq: 783.99, dur: g }, { freq: 659.25, dur: g }, { freq: 523.25, dur: g * 1.25 },
-    { freq: 587.33, dur: g }, { freq: 659.25, dur: g }, { freq: 739.99, dur: g }, { freq: 880.0, dur: g * 1.05 },
-    { freq: 987.77, dur: g * 1.15 }, { freq: 880.0, dur: g }, { freq: 783.99, dur: g }, { freq: 659.25, dur: g * 1.05 },
-    { freq: 523.25, dur: g }, { freq: 659.25, dur: g }, { freq: 783.99, dur: g }, { freq: 880.0, dur: g * 1.15 },
-    { freq: 783.99, dur: g }, { freq: 659.25, dur: g }, { freq: 587.33, dur: g }, { freq: 523.25, dur: g * 1.9 },
-  ];
-
   // Play a sound clip from a URL path (max duration in seconds, default 5)
   const playSoundClip = useCallback((url: string, maxDuration: number = 5) => {
     try {
       const ctx = getAudioContext();
       if (!ctx) return;
-      if (ctx.state !== 'running') ctx.resume();
+      if (ctx.state !== 'running') {
+        void ctx.resume().catch(() => undefined);
+      }
       stopAllSounds();
       loadSample(url, ctx).then(buf => {
         if (!buf) return;
@@ -228,16 +415,15 @@ function useAudio() {
         activeSourcesRef.current.push(src);
         src.onended = () => { activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== src); };
       }).catch(() => {});
-    } catch (_e) {}
+    } catch {}
   }, [getAudioContext, loadSample, stopAllSounds]);
 
-  return { playNote, playMelody, playSoundClip, sodaPopMelody, goldenMelody, initAudio, stopAllSounds };
+  return { playNote, playMelody, playSoundClip, initAudio, stopAllSounds };
 }
 
 // ===== PIANO KEYBOARD (mobile: 2 octaves, desktop: 3 octaves) =====
-function PianoKeyboard({ onClose, playNote, initAudio, stopAllSounds }: { onClose: () => void; playNote: (f: number, d: number, inst?: InstrumentName) => void; initAudio: () => void; stopAllSounds: () => void }) {
+function PianoKeyboard({ onClose, playNote, initAudio }: { onClose: () => void; playNote: (f: number, d: number, inst?: InstrumentName) => void; initAudio: () => void }) {
   const [isPhone, setIsPhone] = useState(false);
-  const [instrument, setInstrument] = useState<'piano' | 'clarinet' | 'recorder'>('piano');
   const [activeKeys, setActiveKeys] = useState<Set<string>>(new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -280,10 +466,10 @@ function PianoKeyboard({ onClose, playNote, initAudio, stopAllSounds }: { onClos
 
   const pressKey = useCallback((note: string, freq: number, isBlack: boolean) => {
     initAudio();
-    playNote(freq, isBlack ? 0.5 : 0.6, instrument);
+    playNote(freq, isBlack ? 0.5 : 0.6, 'piano');
     setActiveKeys(prev => new Set(prev).add(note));
     setTimeout(() => setActiveKeys(prev => { const s = new Set(prev); s.delete(note); return s; }), 200);
-  }, [initAudio, playNote, instrument]);
+  }, [initAudio, playNote]);
 
   // Keyboard mapping: computer keys → MIDI notes (starting at C4 = midi 60)
   const keyboardMap = useRef<Record<string, { note: string; freq: number; isBlack: boolean }>>({});
@@ -344,20 +530,10 @@ function PianoKeyboard({ onClose, playNote, initAudio, stopAllSounds }: { onClos
           <h3 className="text-xl font-bold text-white">🎹 Virtual Piano</h3>
           <button onClick={onClose} className="text-white/60 hover:text-white text-2xl px-3 hover:rotate-90 transition-transform">✕</button>
         </div>
-        {/* Instrument selector */}
-        <div className="flex justify-center gap-2 mb-4">
-          {(['piano', 'clarinet', 'recorder'] as const).map((inst) => (
-            <button key={inst}
-              onClick={() => { stopAllSounds(); setInstrument(inst); }}
-              className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
-                instrument === inst
-                  ? 'bg-white text-gray-900 shadow-lg scale-105'
-                  : 'bg-white/10 text-white/60 hover:bg-white/20 hover:text-white/90'
-              }`}
-            >
-              {inst === 'piano' ? '🎹 Piano' : inst === 'clarinet' ? '🎵 Clarinet' : '🎶 Recorder'}
-            </button>
-          ))}
+        <div className="flex justify-center mb-4">
+          <div className="px-4 py-1.5 rounded-full bg-white/10 text-white/80 text-sm font-medium border border-white/10">
+            Piano sound enabled for reliable playback
+          </div>
         </div>
         {/* Piano keys */}
         <div ref={scrollRef} className="overflow-x-auto pb-2 scrollbar-thin" style={{ scrollbarWidth: 'thin' }}>
@@ -505,13 +681,39 @@ function ScrollProgress() {
 
 // ===== SPARKLES =====
 function useSparkles(count: number) {
-  const [sparkles, setSparkles] = useState<SparkleData[]>([]);
-  useEffect(() => { setSparkles(Array.from({ length: count }, () => ({ left: `${Math.random() * 100}%`, top: `${Math.random() * 100}%`, animationDelay: `${Math.random() * 5}s` }))); }, [count]);
+  const [sparkles] = useState<SparkleData[]>(() => (
+    Array.from({ length: count }, () => ({ left: `${Math.random() * 100}%`, top: `${Math.random() * 100}%`, animationDelay: `${Math.random() * 5}s` }))
+  ));
   return sparkles;
 }
 
 function Sparkle({ style }: { style: SparkleData }) {
   return <span className="absolute text-yellow-300 text-xl animate-pulse pointer-events-none z-0" style={style}>✨</span>;
+}
+
+function JayPortrait({ className, priority = false }: { className: string; priority?: boolean }) {
+  const [hasError, setHasError] = useState(false);
+
+  if (hasError) {
+    return (
+      <div className="w-full h-full rounded-3xl border border-white/20 bg-white/10 backdrop-blur flex items-center justify-center text-center text-white/80 px-4">
+        Jayden
+      </div>
+    );
+  }
+
+  return (
+    <Image
+      src="/images/jay.jpg"
+      alt="Jayden"
+      fill
+      unoptimized
+      sizes="(max-width: 768px) 14rem, 18rem"
+      priority={priority}
+      onError={() => setHasError(true)}
+      className={className}
+    />
+  );
 }
 
 // ===== LOADING SCREEN =====
@@ -525,7 +727,7 @@ function LoadingScreen({ onFinish }: { onFinish: () => void }) {
     <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center">
       <div className="text-center">
         <div className="relative w-40 h-72 mx-auto mb-4">
-          <Image src="/images/jay.jpg" alt="Jayden" fill className={`object-contain drop-shadow-2xl transition-all duration-500 ${progress < 100 ? 'animate-pulse scale-95' : 'scale-110'}`} priority />
+          <JayPortrait className={`object-contain drop-shadow-2xl transition-all duration-500 ${progress < 100 ? 'animate-pulse scale-95' : 'scale-110'}`} priority />
         </div>
         <h1 className="text-3xl font-bold text-white mb-4">Jayden&apos;s World</h1>
         <div className="w-64 h-3 bg-purple-800 rounded-full overflow-hidden mx-auto"><div className="h-full bg-gradient-to-r from-pink-500 to-yellow-500 transition-all" style={{ width: `${progress}%` }} /></div>
@@ -589,10 +791,8 @@ function VirtualPikachu() {
     actionTimeoutRef.current = setTimeout(() => setActionText(null), 1500);
   }, []);
 
-  const hungerRef = useRef(hunger);
-  const energyRef = useRef(energy);
-  hungerRef.current = hunger;
-  energyRef.current = energy;
+  const hungerRef = useSafeStateRef(hunger);
+  const energyRef = useSafeStateRef(energy);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -608,7 +808,7 @@ function VirtualPikachu() {
       });
     }, 3000);
     return () => clearInterval(interval);
-  }, [sleeping]);
+  }, [sleeping, hungerRef, energyRef]);
 
   const mood = sleeping ? 'sleeping'
     : energy < 15 ? 'exhausted'
@@ -660,7 +860,7 @@ function VirtualPikachu() {
     <div className="text-center">
       <div className="relative inline-block mb-4 cursor-pointer" onClick={pet}>
         <div className={`transition-all duration-500 ${imageWrapperClass}`} style={imageWrapperStyle}>
-          <Image src="/images/pokemon/pikachu.png" alt="Pikachu" width={160} height={160} className="mx-auto" />
+          <Image src="/images/pokemon/pikachu.webp" alt="Pikachu" width={160} height={160} sizes="160px" className="mx-auto" />
         </div>
         {mood === 'sleeping' && (
           <span className="absolute -top-2 -right-2 text-3xl animate-pulse">💤</span>
@@ -704,44 +904,51 @@ function VirtualPikachu() {
 // ===== MEMORY GAME =====
 const MEMORY_EMOJIS = ['🕷️', '⚡', '🎵', '🥋', '⭐', '🎨', '🎮', '🍕'];
 function MemoryGame() {
-  const [cards, setCards] = useState<{ id: number; emoji: string; matched: boolean }[]>([]);
+  const createCards = useCallback(() => (
+    [...MEMORY_EMOJIS, ...MEMORY_EMOJIS]
+      .sort(() => Math.random() - 0.5)
+      .map((emoji, i) => ({ id: i, emoji, matched: false }))
+  ), []);
+
+  const [cards, setCards] = useState<{ id: number; emoji: string; matched: boolean }[]>(() => createCards());
   const [selected, setSelected] = useState<number[]>([]);
   const [moves, setMoves] = useState(0);
   const [locked, setLocked] = useState(false);
 
   const initCards = useCallback(() => {
-    const d = [...MEMORY_EMOJIS, ...MEMORY_EMOJIS]
-      .sort(() => Math.random() - 0.5)
-      .map((emoji, i) => ({ id: i, emoji, matched: false }));
-    setCards(d);
+    setCards(createCards());
     setSelected([]);
     setMoves(0);
     setLocked(false);
-  }, []);
-
-  useEffect(() => { initCards(); }, [initCards]);
-
-  useEffect(() => {
-    if (selected.length === 2) {
-      setMoves(m => m + 1);
-      setLocked(true);
-      const [a, b] = selected;
-      if (cards[a].emoji === cards[b].emoji) {
-        setCards(c => c.map((card, i) => (i === a || i === b ? { ...card, matched: true } : card)));
-        setSelected([]);
-        setLocked(false);
-      } else {
-        setTimeout(() => { setSelected([]); setLocked(false); }, 800);
-      }
-    }
-  }, [selected, cards]);
+  }, [createCards]);
 
   const flip = useCallback((i: number) => {
     if (locked) return;
     if (selected.length >= 2) return;
     if (cards[i].matched) return;
     if (selected.includes(i)) return;
-    setSelected(s => [...s, i]);
+
+    const nextSelected = [...selected, i];
+    setSelected(nextSelected);
+
+    if (nextSelected.length !== 2) return;
+
+    setMoves(m => m + 1);
+    setLocked(true);
+    const [a, b] = nextSelected;
+    if (cards[a].emoji === cards[b].emoji) {
+      setCards(currentCards => currentCards.map((card, index) => (
+        index === a || index === b ? { ...card, matched: true } : card
+      )));
+      setSelected([]);
+      setLocked(false);
+      return;
+    }
+
+    setTimeout(() => {
+      setSelected([]);
+      setLocked(false);
+    }, 800);
   }, [locked, selected, cards]);
 
   const won = cards.length > 0 && cards.every(c => c.matched);
@@ -1098,12 +1305,12 @@ function MonkeyBananaGame() {
     setMonkeyX(next);
   }, []);
 
-  const gameLoop = useCallback((timestamp: number) => {
+  const gameLoop = useCallback(function gameLoopFrame(timestamp: number) {
     if (!runningRef.current) return;
 
     if (lastFrameRef.current === 0) {
       lastFrameRef.current = timestamp;
-      rafRef.current = requestAnimationFrame(gameLoop);
+      rafRef.current = requestAnimationFrame(gameLoopFrame);
       return;
     }
 
@@ -1157,7 +1364,7 @@ function MonkeyBananaGame() {
     }
 
     setBananasSnapshot([...bananasRef.current]);
-    rafRef.current = requestAnimationFrame(gameLoop);
+    rafRef.current = requestAnimationFrame(gameLoopFrame);
   }, []);
 
   useEffect(() => {
@@ -1423,8 +1630,8 @@ export default function Home() {
   const [activeSection, setActiveSection] = useState(0);
   const [showPiano, setShowPiano] = useState(false);
   const [pokeEffect, setPokeEffect] = useState<{ type: string; x: number; y: number } | null>(null);
-  const sparkles = useSparkles(30);
-  const { playNote, playMelody, playSoundClip, sodaPopMelody, goldenMelody, initAudio, stopAllSounds } = useAudio();
+  const sparkles = useSparkles(18);
+  const { playNote, playMelody, playSoundClip, initAudio, stopAllSounds } = useAudio();
 
   const triggerPokeEffect = (type: string, e: React.MouseEvent, pokemonName?: string) => {
     initAudio();
@@ -1474,7 +1681,7 @@ export default function Home() {
         <FloatingEmoji emoji="🌟" delay={1.2} left="15%" />
         <div className="flex flex-col md:flex-row items-center gap-8 z-10">
           <div className="relative w-48 h-80 md:w-56 md:h-96 flex-shrink-0">
-            <Image src="/images/jay.jpg" alt="Jayden" fill className="object-contain drop-shadow-[0_0_30px_rgba(236,72,153,0.5)] hover:scale-105 transition-transform duration-500" priority />
+            <JayPortrait className="object-contain drop-shadow-[0_0_30px_rgba(236,72,153,0.5)] hover:scale-105 transition-transform duration-500" priority />
           </div>
           <div className="text-center md:text-left">
             <h1 className="text-5xl md:text-7xl font-bold mb-6 bg-gradient-to-r from-yellow-300 via-pink-400 to-purple-400 bg-clip-text text-transparent animate-pulse">
@@ -1494,17 +1701,10 @@ export default function Home() {
         <div className="max-w-4xl mx-auto">
           <h2 className="text-4xl md:text-5xl font-bold text-center mb-12 bg-gradient-to-r from-yellow-300 to-pink-400 bg-clip-text text-transparent">😎 About Me</h2>
           <div className="grid md:grid-cols-3 gap-6">
-            {[
-              { icon: '🎂', title: 'Age', value: '4 Years Old', color: 'from-pink-500 to-rose-500' },
-              { title: 'Born', value: 'Hong Kong', color: 'from-blue-500 to-cyan-500', isFlag: true },
-              { icon: '⚡', title: 'Superpower', value: 'Being Awesome!', color: 'from-yellow-500 to-orange-500' },
-              { icon: '🏃', title: 'Personality', value: 'Active & Energetic', color: 'from-green-500 to-emerald-500' },
-              { icon: '😄', title: 'Vibe', value: 'Outgoing & Confident', color: 'from-purple-500 to-violet-500' },
-              { icon: '💪', title: 'Special', value: 'Super Handsome', color: 'from-red-500 to-pink-500' },
-            ].map((item, i) => (
+            {ABOUT_CARDS.map((item, i) => (
               <TiltCard key={i}>
                 <div className={`p-6 rounded-3xl bg-gradient-to-br ${item.color} shadow-lg`}>
-                  {(item as any).isFlag ? (
+                  {item.isFlag ? (
                     <div className="mb-3"><Image src="/images/hk-flag.svg" alt="Hong Kong" width={60} height={40} className="rounded shadow-md" /></div>
                   ) : (
                     <div className="text-5xl mb-3">{item.icon}</div>
@@ -1523,15 +1723,10 @@ export default function Home() {
         <div className="max-w-4xl mx-auto">
           <h2 className="text-4xl md:text-5xl font-bold text-center mb-12 bg-gradient-to-r from-orange-300 to-yellow-400 bg-clip-text text-transparent">😋 Favourite Food</h2>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-            {[
-              { name: 'Siu Mai', emoji: '', desc: 'Dim sum champion!', color: 'from-orange-400 to-red-500', isSiuMai: true },
-              { name: 'French Fries', emoji: '🍟', desc: 'Crispy & golden!', color: 'from-yellow-400 to-amber-500' },
-              { name: 'Chicken', emoji: '🍗', desc: 'Yummy & juicy!', color: 'from-amber-400 to-orange-500' },
-              { name: 'Fish Stick', emoji: '🐟', desc: 'Ocean goodness!', color: 'from-blue-400 to-cyan-500' },
-            ].map((item, i) => (
+            {FOOD_CARDS.map((item, i) => (
               <TiltCard key={i}>
                 <div className={`p-6 rounded-3xl bg-gradient-to-br ${item.color} shadow-xl text-center`}>
-                  {(item as any).isSiuMai ? (
+                  {item.isSiuMai ? (
                     <div className="mb-3 flex justify-center"><Image src="/images/siu-mai.svg" alt="Siu Mai" width={80} height={80} className="drop-shadow-lg" /></div>
                   ) : (
                     <div className="text-6xl mb-3">{item.emoji}</div>
@@ -1581,24 +1776,9 @@ export default function Home() {
       <RevealSection><section id="music" className="py-20 px-4 bg-gradient-to-b from-transparent via-purple-800/30 to-transparent">
         <div className="max-w-4xl mx-auto">
           <h2 className="text-4xl md:text-5xl font-bold text-center mb-4 bg-gradient-to-r from-cyan-300 to-purple-400 bg-clip-text text-transparent">🎵 My Musical Adventure 🎵</h2>
-          <p className="text-center text-purple-200 mb-12 text-lg">Click to hear real instrument sounds!</p>
+          <p className="text-center text-purple-200 mb-12 text-lg">Click to hear instrument melodies and open the piano!</p>
           <div className="grid md:grid-cols-3 gap-6 mt-8">
-            {[
-              { icon: '🎵', name: 'Clarinet', desc: 'My jazzy friend!', status: 'Learning', color: 'from-blue-500 to-indigo-600', instrument: 'clarinet' as const, melody: [
-                { freq: 261.63, dur: 0.32 }, { freq: 293.66, dur: 0.28 }, { freq: 329.63, dur: 0.34 }, { freq: 392.0, dur: 0.45 },
-                { freq: 349.23, dur: 0.3 }, { freq: 329.63, dur: 0.28 }, { freq: 293.66, dur: 0.3 }, { freq: 392.0, dur: 0.48 },
-                { freq: 440.0, dur: 0.36 }, { freq: 392.0, dur: 0.5 },
-              ]},
-              { icon: '🎶', name: 'Recorder', desc: 'My first instrument!', status: 'Playing', color: 'from-green-500 to-teal-600', instrument: 'recorder' as const, melody: [
-                { freq: 523.25, dur: 0.28 }, { freq: 587.33, dur: 0.28 }, { freq: 659.25, dur: 0.34 }, { freq: 587.33, dur: 0.28 },
-                { freq: 523.25, dur: 0.28 }, { freq: 493.88, dur: 0.3 }, { freq: 440.0, dur: 0.34 }, { freq: 392.0, dur: 0.3 },
-                { freq: 349.23, dur: 0.5 },
-              ]},
-              { icon: '🎹', name: 'Piano', desc: '32 keys to play!', status: 'Practicing', color: 'from-purple-500 to-pink-600', isPiano: true, instrument: 'piano' as const, melody: [
-                { freq: 261.63, dur: 0.3 }, { freq: 329.63, dur: 0.3 }, { freq: 392.0, dur: 0.4 },
-                { freq: 523.25, dur: 0.3 }, { freq: 392.0, dur: 0.3 }, { freq: 329.63, dur: 0.5 },
-              ]},
-            ].map((item, i) => (
+            {MUSIC_CARDS.map((item, i) => (
               <TiltCard key={i}>
                 <div className={`p-6 rounded-3xl bg-gradient-to-br ${item.color} text-center shadow-xl cursor-pointer group`}
                      onClick={() => { initAudio(); stopAllSounds(); playMelody(item.melody, 220, item.instrument); }}>
@@ -1607,7 +1787,7 @@ export default function Home() {
                   <p className="text-white/80 mb-3">{item.desc}</p>
                   <span className="px-4 py-1 bg-white/20 rounded-full text-sm">{item.status}</span>
                   <p className="text-xs mt-2 text-white/50">🎵 Click to play!</p>
-                  {(item as any).isPiano && (
+                  {item.isPiano && (
                     <button
                       onClick={(e) => { e.stopPropagation(); initAudio(); stopAllSounds(); setShowPiano(true); }}
                       className="mt-3 px-5 py-2 bg-white/25 hover:bg-white/40 rounded-full text-sm font-semibold transition-all hover:scale-105 backdrop-blur-sm border border-white/20"
@@ -1666,20 +1846,20 @@ export default function Home() {
           <h2 className="text-4xl md:text-5xl font-bold text-center mb-12 bg-gradient-to-r from-yellow-300 to-blue-400 bg-clip-text text-transparent">⚡ Pokémon Collection ⚡</h2>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {[
-              { name: 'Pikachu', file: 'pikachu.png', type: 'Electric', color: 'from-yellow-300 to-yellow-500' },
-              { name: 'Charmander', file: 'charmander.png', type: 'Fire', color: 'from-orange-400 to-red-500' },
-              { name: 'Squirtle', file: 'squirtle.png', type: 'Water', color: 'from-blue-400 to-blue-600' },
-              { name: 'Bulbasaur', file: 'bulbasaur.png', type: 'Grass', color: 'from-green-400 to-green-600' },
-              { name: 'Eevee', file: 'eevee.png', type: 'Normal', color: 'from-amber-400 to-orange-500' },
-              { name: 'Jigglypuff', file: 'jigglypuff.png', type: 'Fairy', color: 'from-pink-300 to-pink-500' },
-              { name: 'Charizard', file: 'charizard.png', type: 'Fire/Flying', color: 'from-red-500 to-orange-600' },
-              { name: 'Mewtwo', file: 'mewtwo.png', type: 'Psychic', color: 'from-purple-400 to-purple-600' },
+              { name: 'Pikachu', file: 'pikachu.webp', type: 'Electric', color: 'from-yellow-300 to-yellow-500' },
+              { name: 'Charmander', file: 'charmander.webp', type: 'Fire', color: 'from-orange-400 to-red-500' },
+              { name: 'Squirtle', file: 'squirtle.webp', type: 'Water', color: 'from-blue-400 to-blue-600' },
+              { name: 'Bulbasaur', file: 'bulbasaur.webp', type: 'Grass', color: 'from-green-400 to-green-600' },
+              { name: 'Eevee', file: 'eevee.webp', type: 'Normal', color: 'from-amber-400 to-orange-500' },
+              { name: 'Jigglypuff', file: 'jigglypuff.webp', type: 'Fairy', color: 'from-pink-300 to-pink-500' },
+              { name: 'Charizard', file: 'charizard.webp', type: 'Fire/Flying', color: 'from-red-500 to-orange-600' },
+              { name: 'Mewtwo', file: 'mewtwo.webp', type: 'Psychic', color: 'from-purple-400 to-purple-600' },
             ].map((item, i) => (
               <TiltCard key={i}>
                 <div className={`p-4 rounded-2xl bg-gradient-to-br ${item.color} shadow-lg cursor-pointer group`}
                      onClick={(e) => triggerPokeEffect(item.type, e, item.name)}>
                   <div className="relative w-full aspect-square mb-2">
-                    <Image src={`/images/pokemon/${item.file}`} alt={item.name} fill className="object-contain drop-shadow-xl group-hover:scale-110 transition-transform" />
+                    <Image src={`/images/pokemon/${item.file}`} alt={item.name} fill sizes="(max-width: 768px) 44vw, 220px" quality={70} className="object-contain drop-shadow-xl group-hover:scale-110 transition-transform" />
                   </div>
                   <div className="text-center">
                     <div className="font-bold">{item.name}</div>
@@ -1701,7 +1881,7 @@ export default function Home() {
             <a href="https://www.hkcot.com/goldfish/" target="_blank" rel="noopener noreferrer"
                className="block rounded-3xl shadow-2xl hover:scale-105 transition-all duration-300 group overflow-hidden">
               <div className="relative">
-                <Image src="/images/goldfish-artwork.jpg" alt="Jayden's Space Art" width={400} height={400} className="w-full h-auto" />
+                <Image src="/images/goldfish-artwork.jpg" alt="Jayden's Space Art" width={400} height={400} sizes="(max-width: 768px) 88vw, 400px" quality={78} className="w-full h-auto" />
                 <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-center pb-6">
                   <span className="text-white text-xl font-bold">🎧 Click to listen to the story!</span>
                 </div>
@@ -1727,7 +1907,7 @@ export default function Home() {
                 <div className="w-[calc(50vw-2rem)] md:w-56 p-4 rounded-2xl bg-gradient-to-br from-red-600/30 to-blue-800/30 backdrop-blur shadow-xl cursor-pointer group relative overflow-hidden"
                      onClick={() => { initAudio(); playSoundClip(item.sound, 5); }}>
                   <div className="relative w-full aspect-square">
-                    <Image src={`/images/spiderman/spiderman_${item.id}.png`} alt={item.name} fill className="object-contain drop-shadow-2xl group-hover:scale-110 transition-transform" />
+                    <Image src={`/images/spiderman/spiderman_${item.id}.webp`} alt={item.name} fill sizes="(max-width: 768px) 42vw, 224px" quality={70} className="object-contain drop-shadow-2xl group-hover:scale-110 transition-transform" />
                   </div>
                   <p className="text-center text-sm font-bold mt-2 text-white/80">{item.name}</p>
                   <p className="text-center text-xs text-white/50 mt-1">{item.quote} Tap to hear!</p>
@@ -1805,7 +1985,7 @@ export default function Home() {
       </footer>
 
       {/* PIANO POPUP */}
-      {showPiano && <PianoKeyboard onClose={() => { setShowPiano(false); stopAllSounds(); }} playNote={playNote} initAudio={initAudio} stopAllSounds={stopAllSounds} />}
+      {showPiano && <PianoKeyboard onClose={() => { setShowPiano(false); stopAllSounds(); }} playNote={playNote} initAudio={initAudio} />}
 
       {/* POKEMON EFFECT */}
       {pokeEffect && <PokemonEffect type={pokeEffect.type} x={pokeEffect.x} y={pokeEffect.y} onDone={() => setPokeEffect(null)} />}
