@@ -21,6 +21,7 @@ export default function MonkeyBananaGame() {
   const scoreRef = useRef(0);
   const missesRef = useRef(0);
   const arenaRef = useRef<HTMLDivElement>(null);
+  const draggingPointerIdRef = useRef<number | null>(null);
 
   const setMonkeyTarget = useCallback((percent: number) => {
     const next = Math.max(8, Math.min(92, percent));
@@ -135,6 +136,26 @@ export default function MonkeyBananaGame() {
     setMonkeyTarget(((clientX - rect.left) / rect.width) * 100);
   }, [setMonkeyTarget]);
 
+  const handlePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    draggingPointerIdRef.current = event.pointerId;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    handlePointer(event.clientX);
+  }, [handlePointer]);
+
+  const handlePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== 'mouse' && draggingPointerIdRef.current !== event.pointerId) return;
+    handlePointer(event.clientX);
+  }, [handlePointer]);
+
+  const handlePointerUp = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (draggingPointerIdRef.current === event.pointerId) {
+      draggingPointerIdRef.current = null;
+    }
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }, []);
+
   return (
     <div className="text-center">
       <div className="flex justify-center gap-6 mb-4 text-lg font-bold">
@@ -153,8 +174,11 @@ export default function MonkeyBananaGame() {
         <div
           ref={arenaRef}
           className="relative h-80 rounded-3xl overflow-hidden border border-white/10 bg-gradient-to-b from-cyan-400 via-green-500 to-green-800 touch-none cursor-ew-resize"
-          onPointerDown={(event) => handlePointer(event.clientX)}
-          onPointerMove={(event) => handlePointer(event.clientX)}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+          onPointerLeave={handlePointerUp}
         >
           <div className="absolute inset-x-0 top-3 text-center text-white/80 text-sm font-medium drop-shadow">Move finger or mouse to catch bananas!</div>
           {bananasSnapshot.map(item => (
@@ -168,7 +192,7 @@ export default function MonkeyBananaGame() {
           ))}
           <div className="absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-amber-900/60 via-green-900/30 to-transparent" />
           <div className="absolute inset-x-0 bottom-0 h-4 bg-green-900/50" />
-          <div className="absolute -translate-x-1/2 -translate-y-1/2 text-5xl transition-[left] duration-75" style={{ left: `${monkeyX}%`, top: '84%' }}>🐵</div>
+          <div className="absolute -translate-x-1/2 -translate-y-1/2 text-5xl will-change-transform" style={{ left: `${monkeyX}%`, top: '84%' }}>🐵</div>
         </div>
       )}
       {running && <button onClick={() => stopGame(true)} className="mt-3 px-6 py-2 bg-red-500 rounded-full text-white font-bold">Stop</button>}

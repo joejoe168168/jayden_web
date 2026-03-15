@@ -97,6 +97,32 @@ function SectionLoader({ label }: { label: string }) {
   return <div className="py-12 text-center text-white/60">{label}</div>;
 }
 
+function LazyMount({
+  children,
+  placeholder,
+  rootMargin = '320px',
+}: {
+  children: React.ReactNode;
+  placeholder?: React.ReactNode;
+  rootMargin?: string;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [shouldRender, setShouldRender] = useState(false);
+
+  useEffect(() => {
+    if (shouldRender || !ref.current) return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        setShouldRender(true);
+      }
+    }, { rootMargin });
+    observer.observe(ref.current);
+    return () => observer.disconnect();
+  }, [rootMargin, shouldRender]);
+
+  return <div ref={ref}>{shouldRender ? children : placeholder ?? <SectionLoader label="Loading..." />}</div>;
+}
+
 const PianoKeyboard = dynamic(() => import('@/components/jayden/PianoKeyboard'), {
   ssr: false,
   loading: () => <SectionLoader label="Loading piano..." />,
@@ -129,6 +155,7 @@ function useAudio() {
   const ctxRef = useRef<AudioContext | null>(null);
   const unlockedRef = useRef(false);
   const noiseBufferRef = useRef<AudioBuffer | null>(null);
+  const clipRequestIdRef = useRef(0);
   // Sample cache: keyed by instrument name
   const sampleCacheRef = useRef<Record<string, AudioBuffer>>({});
   const sampleLoadingRef = useRef<Record<string, Promise<AudioBuffer | null>>>({});
@@ -216,8 +243,7 @@ function useAudio() {
     } catch {}
   }, [getAudioContext]);
 
-  // Stop all currently playing sounds
-  const stopAllSounds = useCallback(() => {
+  const stopActiveSounds = useCallback(() => {
     // Stop buffer sources
     activeSourcesRef.current.forEach(src => {
       try { src.stop(); } catch {}
@@ -229,6 +255,12 @@ function useAudio() {
     });
     activeOscillatorsRef.current = [];
   }, []);
+
+  // Stop all currently playing sounds and invalidate pending async clip starts.
+  const stopAllSounds = useCallback(() => {
+    clipRequestIdRef.current += 1;
+    stopActiveSounds();
+  }, [stopActiveSounds]);
 
   const playSynthNote = useCallback((ctx: AudioContext, freq: number, duration: number, instrument: 'piano' | 'clarinet' | 'recorder') => {
     const now = ctx.currentTime + 0.01;
@@ -418,9 +450,11 @@ function useAudio() {
       if (ctx.state !== 'running') {
         void ctx.resume().catch(() => undefined);
       }
-      stopAllSounds();
+      const requestId = clipRequestIdRef.current + 1;
+      clipRequestIdRef.current = requestId;
+      stopActiveSounds();
       loadSample(url, ctx).then(buf => {
-        if (!buf) return;
+        if (!buf || clipRequestIdRef.current !== requestId) return;
         const now = ctx.currentTime + 0.01;
         const dur = Math.min(maxDuration, buf.duration);
         const src = ctx.createBufferSource();
@@ -436,13 +470,13 @@ function useAudio() {
         src.onended = () => { activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== src); };
       }).catch(() => {});
     } catch {}
-  }, [getAudioContext, loadSample, stopAllSounds]);
+  }, [getAudioContext, loadSample, stopActiveSounds]);
 
   return { playNote, playSoundClip, initAudio, stopAllSounds };
 }
 
 // ===== POKEMON EFFECTS =====
-function PokemonEffect({ type, x, y, onDone }: { type: string; x: number; y: number; onDone: () => void }) {
+function PokemonEffect({ type, x, y, onDone, reducedMotion = false }: { type: string; x: number; y: number; onDone: () => void; reducedMotion?: boolean }) {
   useEffect(() => { const t = setTimeout(onDone, 2000); return () => clearTimeout(t); }, [onDone]);
   const effects: Record<string, { emoji: string; color: string; label: string }> = {
     Electric: { emoji: '⚡', color: 'from-yellow-400 to-yellow-600', label: 'Thunderbolt!' },
@@ -457,10 +491,10 @@ function PokemonEffect({ type, x, y, onDone }: { type: string; x: number; y: num
   const fx = effects[type] || effects['Normal'];
   return (
     <div className="fixed z-[8000] pointer-events-none" style={{ left: x - 50, top: y - 50 }}>
-      <div className="text-6xl animate-ping">{fx.emoji}</div>
-      <div className={`text-lg font-bold text-center bg-gradient-to-r ${fx.color} bg-clip-text text-transparent animate-bounce`}>{fx.label}</div>
+      <div className={`text-6xl ${reducedMotion ? '' : 'animate-ping'}`}>{fx.emoji}</div>
+      <div className={`text-lg font-bold text-center bg-gradient-to-r ${fx.color} bg-clip-text text-transparent ${reducedMotion ? '' : 'animate-bounce'}`}>{fx.label}</div>
       {Array.from({ length: 8 }).map((_, i) => (
-        <span key={i} className="absolute text-2xl animate-ping" style={{
+        <span key={i} className={`absolute text-2xl ${reducedMotion ? '' : 'animate-ping'}`} style={{
           left: `${Math.cos(i * 45 * Math.PI / 180) * 60}px`,
           top: `${Math.sin(i * 45 * Math.PI / 180) * 60}px`,
           animationDelay: `${i * 0.1}s`,
@@ -562,10 +596,11 @@ function ScrollProgress() {
 
 // ===== SPARKLES =====
 function useSparkles(count: number) {
-  const [sparkles] = useState<SparkleData[]>(() => (
-    Array.from({ length: count }, () => ({ left: `${Math.random() * 100}%`, top: `${Math.random() * 100}%`, animationDelay: `${Math.random() * 5}s` }))
-  ));
-  return sparkles;
+  return Array.from({ length: count }, (_, index) => ({
+    left: `${(index * 17.7 + 9) % 100}%`,
+    top: `${(index * 23.5 + 14) % 100}%`,
+    animationDelay: `${(index * 0.37) % 5}s`,
+  }));
 }
 
 function Sparkle({ style }: { style: SparkleData }) {
@@ -680,7 +715,7 @@ function NavDots({ sections, active }: { sections: string[]; active: number }) {
 }
 
 // ===== VIRTUAL PIKACHU =====
-function VirtualPikachu() {
+function VirtualPikachu({ reducedMotion = false }: { reducedMotion?: boolean }) {
   const [hunger, setHunger] = useState(10);
   const [energy, setEnergy] = useState(80);
   const [happiness, setHappiness] = useState(70);
@@ -748,9 +783,9 @@ function VirtualPikachu() {
   const canFeed = !sleeping;
   const canPlay = !sleeping && energy >= 15;
 
-  const imageWrapperClass = mood === 'happy' ? 'animate-bounce'
+  const imageWrapperClass = mood === 'happy' ? (reducedMotion ? '' : 'animate-bounce')
     : mood === 'sleeping' ? 'grayscale-50 scale-90'
-    : mood === 'hungry' ? 'animate-pulse border-2 border-red-400 rounded-full'
+    : mood === 'hungry' ? `${reducedMotion ? '' : 'animate-pulse '}border-2 border-red-400 rounded-full`
     : mood === 'sad' ? 'grayscale scale-75'
     : mood === 'exhausted' ? 'grayscale-75 opacity-60'
     : '';
@@ -766,10 +801,10 @@ function VirtualPikachu() {
           <Image src="/images/pokemon/pikachu.webp" alt="Pikachu" width={160} height={160} sizes="160px" className="mx-auto" />
         </div>
         {mood === 'sleeping' && (
-          <span className="absolute -top-2 -right-2 text-3xl animate-pulse">💤</span>
+          <span className={`absolute -top-2 -right-2 text-3xl ${reducedMotion ? '' : 'animate-pulse'}`}>💤</span>
         )}
         {actionText && (
-          <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-2xl font-bold text-yellow-300 animate-bounce whitespace-nowrap">
+          <div className={`absolute -top-8 left-1/2 -translate-x-1/2 text-2xl font-bold text-yellow-300 whitespace-nowrap ${reducedMotion ? '' : 'animate-bounce'}`}>
             {actionText}
           </div>
         )}
@@ -801,6 +836,53 @@ function VirtualPikachu() {
         <button onClick={toggleSleep} className="px-4 py-2 bg-indigo-500 rounded-full hover:scale-110 transition">{sleeping ? '☀️ Wake' : '😴 Sleep'}</button>
       </div>
     </div>
+  );
+}
+
+function SpotifyEmbedCard({
+  title,
+  subtitle,
+  emoji,
+  colorClass,
+  trackId,
+  reducedMotion = false,
+}: {
+  title: string;
+  subtitle: string;
+  emoji: string;
+  colorClass: string;
+  trackId: string;
+  reducedMotion?: boolean;
+}) {
+  const [loaded, setLoaded] = useState(false);
+
+  return (
+    <TiltCard>
+      <div className={`p-6 rounded-3xl bg-gradient-to-br ${colorClass} shadow-2xl relative overflow-hidden`}>
+        <div className={`text-6xl mb-4 text-center ${reducedMotion ? '' : 'animate-bounce'}`}>{emoji}</div>
+        <h3 className="text-3xl font-bold text-center mb-1">{title}</h3>
+        <p className="text-center text-sm opacity-70 mb-4">{subtitle}</p>
+        {loaded ? (
+          <iframe
+            style={{ borderRadius: '12px' }}
+            src={`https://open.spotify.com/embed/track/${trackId}`}
+            width="100%"
+            height="152"
+            frameBorder={0}
+            allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+            loading="lazy"
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={() => setLoaded(true)}
+            className="w-full h-[152px] rounded-xl border border-white/20 bg-black/20 backdrop-blur text-white/90 font-semibold hover:bg-black/30 transition"
+          >
+            Load Spotify Player
+          </button>
+        )}
+      </div>
+    </TiltCard>
   );
 }
 
@@ -864,7 +946,7 @@ export default function Home() {
             <JayPortrait className="object-contain drop-shadow-[0_0_30px_rgba(236,72,153,0.5)] hover:scale-105 transition-transform duration-500" priority />
           </div>
           <div className="text-center md:text-left">
-            <h1 className="text-5xl md:text-7xl font-bold mb-6 bg-gradient-to-r from-yellow-300 via-pink-400 to-purple-400 bg-clip-text text-transparent animate-pulse">
+            <h1 className={`text-5xl md:text-7xl font-bold mb-6 bg-gradient-to-r from-yellow-300 via-pink-400 to-purple-400 bg-clip-text text-transparent ${prefersReducedMotion ? '' : 'animate-pulse'}`}>
               ✨ Welcome to Jayden&apos;s World ✨
             </h1>
             <p className="text-xl md:text-2xl mb-8 text-purple-200">I&apos;m Jayden — a 4-year-old superhero from Hong Kong! 🇭🇰</p>
@@ -927,27 +1009,12 @@ export default function Home() {
           <p className="text-center text-purple-200 mb-12 text-lg">My favorite songs! (from the movie Hunties)</p>
           <div className="grid md:grid-cols-2 gap-8">
             {/* Soda Pop */}
-            <TiltCard>
-              <div className="p-6 rounded-3xl bg-gradient-to-br from-cyan-400 to-blue-500 shadow-2xl relative overflow-hidden">
-                <div className="text-6xl mb-4 text-center animate-bounce">🥤</div>
-                <h3 className="text-3xl font-bold text-center mb-1">Soda Pop</h3>
-                <p className="text-center text-sm opacity-70 mb-4">Catchy beats! 🎶</p>
-                <iframe style={{ borderRadius: '12px' }} src="https://open.spotify.com/embed/track/02sy7FAs8dkDNYsHp4Ul3f" width="100%" height="152" frameBorder={0} allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy" />
-              </div>
-            </TiltCard>
-            {/* Golden */}
-            <TiltCard>
-              <div className="p-6 rounded-3xl bg-gradient-to-br from-yellow-400 to-amber-500 shadow-2xl relative overflow-hidden">
-                <div className="text-6xl mb-4 text-center animate-bounce">⭐</div>
-                <h3 className="text-3xl font-bold text-center mb-1">Golden</h3>
-                <p className="text-center text-sm opacity-70 mb-4">My favorite! ✨</p>
-                <iframe style={{ borderRadius: '12px' }} src="https://open.spotify.com/embed/track/1CPZ5BxNNd0n0nF4Orb9JS" width="100%" height="152" frameBorder={0} allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy" />
-              </div>
-            </TiltCard>
+            <SpotifyEmbedCard title="Soda Pop" subtitle="Catchy beats! 🎶" emoji="🥤" colorClass="from-cyan-400 to-blue-500" trackId="02sy7FAs8dkDNYsHp4Ul3f" reducedMotion={prefersReducedMotion} />
+            <SpotifyEmbedCard title="Golden" subtitle="My favorite! ✨" emoji="⭐" colorClass="from-yellow-400 to-amber-500" trackId="1CPZ5BxNNd0n0nF4Orb9JS" reducedMotion={prefersReducedMotion} />
           </div>
           <div className="flex justify-center gap-3 mt-8">
-            <span className="px-4 py-2 bg-pink-500/30 rounded-full text-sm animate-pulse">🎧 Loves K-pop</span>
-            <span className="px-4 py-2 bg-purple-500/30 rounded-full text-sm animate-pulse" style={{ animationDelay: '0.5s' }}>🌟 Future star</span>
+            <span className={`px-4 py-2 bg-pink-500/30 rounded-full text-sm ${prefersReducedMotion ? '' : 'animate-pulse'}`}>🎧 Loves K-pop</span>
+            <span className={`px-4 py-2 bg-purple-500/30 rounded-full text-sm ${prefersReducedMotion ? '' : 'animate-pulse'}`} style={{ animationDelay: '0.5s' }}>🌟 Future star</span>
           </div>
         </div>
       </section></RevealSection>
@@ -1001,7 +1068,7 @@ export default function Home() {
               { belt: 'Black', color: 'bg-gray-900', active: false, next: false },
             ].map((item, i) => (
               <div key={i} className="flex flex-col items-center">
-                <div className={`w-8 h-12 rounded ${item.color} ${item.active ? 'ring-4 ring-white scale-125 shadow-lg shadow-white/40' : item.next ? 'opacity-70 ring-2 ring-yellow-300/50 animate-pulse' : 'opacity-30'} transition-all`} />
+                <div className={`w-8 h-12 rounded ${item.color} ${item.active ? 'ring-4 ring-white scale-125 shadow-lg shadow-white/40' : item.next ? `opacity-70 ring-2 ring-yellow-300/50 ${prefersReducedMotion ? '' : 'animate-pulse'}` : 'opacity-30'} transition-all`} />
                 <span className={`text-xs mt-2 ${item.active ? 'text-white font-bold' : item.next ? 'text-yellow-300/80' : 'text-white/50'}`}>{item.belt}{item.next ? ' ⬆️' : ''}</span>
               </div>
             ))}
@@ -1120,7 +1187,7 @@ export default function Home() {
         <div className="max-w-4xl mx-auto">
           <h2 className="text-4xl md:text-5xl font-bold text-center mb-12 bg-gradient-to-r from-yellow-300 to-orange-400 bg-clip-text text-transparent">⚡ My Pet Pikachu ⚡</h2>
           <div className="max-w-md mx-auto bg-white/10 backdrop-blur rounded-3xl p-8">
-            <VirtualPikachu />
+            <VirtualPikachu reducedMotion={prefersReducedMotion} />
           </div>
         </div>
       </section></RevealSection>
@@ -1130,10 +1197,10 @@ export default function Home() {
         <div className="max-w-6xl mx-auto">
           <h2 className="text-4xl md:text-5xl font-bold text-center mb-12 bg-gradient-to-r from-green-300 to-cyan-400 bg-clip-text text-transparent">🎮 Mini Games 🎮</h2>
           <div className="grid lg:grid-cols-2 gap-8">
-            <div className="bg-white/10 backdrop-blur rounded-3xl p-6"><h3 className="text-2xl font-bold text-center mb-4">🧠 Memory Match</h3><MemoryGame /></div>
-            <div className="bg-white/10 backdrop-blur rounded-3xl p-6"><h3 className="text-2xl font-bold text-center mb-4">⭐ Catch the Stars</h3><StarCatchGame /></div>
-            <div className="bg-white/10 backdrop-blur rounded-3xl p-6"><h3 className="text-2xl font-bold text-center mb-4">🕷️ Spider-Man Web Shooter</h3><SpiderManWebGame playNote={playNote} initAudio={initAudio} /></div>
-            <div className="bg-white/10 backdrop-blur rounded-3xl p-6"><h3 className="text-2xl font-bold text-center mb-4">🐵 Monkey Banana Catch</h3><MonkeyBananaGame /></div>
+            <div className="bg-white/10 backdrop-blur rounded-3xl p-6"><h3 className="text-2xl font-bold text-center mb-4">🧠 Memory Match</h3><LazyMount placeholder={<SectionLoader label="Memory game ready below..." />}><MemoryGame /></LazyMount></div>
+            <div className="bg-white/10 backdrop-blur rounded-3xl p-6"><h3 className="text-2xl font-bold text-center mb-4">⭐ Catch the Stars</h3><LazyMount placeholder={<SectionLoader label="Star game ready below..." />}><StarCatchGame /></LazyMount></div>
+            <div className="bg-white/10 backdrop-blur rounded-3xl p-6"><h3 className="text-2xl font-bold text-center mb-4">🕷️ Spider-Man Web Shooter</h3><LazyMount placeholder={<SectionLoader label="Web shooter ready below..." />}><SpiderManWebGame playNote={playNote} initAudio={initAudio} /></LazyMount></div>
+            <div className="bg-white/10 backdrop-blur rounded-3xl p-6"><h3 className="text-2xl font-bold text-center mb-4">🐵 Monkey Banana Catch</h3><LazyMount placeholder={<SectionLoader label="Banana catch ready below..." />}><MonkeyBananaGame /></LazyMount></div>
           </div>
         </div>
       </section></RevealSection>
@@ -1143,7 +1210,7 @@ export default function Home() {
         <div className="max-w-4xl mx-auto">
           <h2 className="text-4xl md:text-5xl font-bold text-center mb-12 bg-gradient-to-r from-pink-300 to-purple-400 bg-clip-text text-transparent">🎨 Draw Something! 🎨</h2>
           <div className="max-w-xl mx-auto bg-white/10 backdrop-blur rounded-3xl p-6">
-            <DrawingCanvas />
+            <LazyMount placeholder={<SectionLoader label="Drawing board ready below..." />}><DrawingCanvas /></LazyMount>
           </div>
         </div>
       </section></RevealSection>
@@ -1183,7 +1250,7 @@ export default function Home() {
       {showPiano && <PianoKeyboard onClose={() => { setShowPiano(false); stopAllSounds(); }} playNote={playNote} initAudio={initAudio} />}
 
       {/* POKEMON EFFECT */}
-      {pokeEffect && <PokemonEffect type={pokeEffect.type} x={pokeEffect.x} y={pokeEffect.y} onDone={() => setPokeEffect(null)} />}
+      {pokeEffect && <PokemonEffect type={pokeEffect.type} x={pokeEffect.x} y={pokeEffect.y} onDone={() => setPokeEffect(null)} reducedMotion={prefersReducedMotion} />}
     </div>
   );
 }

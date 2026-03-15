@@ -192,7 +192,7 @@ export default function PianoKeyboard({ onClose, playNote, initAudio }: Props) {
         </div>
         <div className="flex justify-between items-center mt-3 px-1">
           <p className="text-white/30 text-xs">{isPhone ? 'Swipe to scroll · Tap to play' : 'Use keyboard: A-L for white keys, W-P for sharps'}</p>
-          <p className="text-white/30 text-xs">{isPhone ? '2 octaves: C4 → C5' : '3 octaves: C3 → C5'} 🎵</p>
+          <p className="text-white/30 text-xs">{isPhone ? '2 octaves: C4 → C6' : '3 octaves: C3 → C6'} 🎵</p>
         </div>
       </div>
     </div>
