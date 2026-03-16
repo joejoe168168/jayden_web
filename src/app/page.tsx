@@ -16,6 +16,7 @@ type MusicCard = {
   status: string;
   color: string;
   trackPath: string;
+  mobileTrackPath?: string;
   isPiano?: boolean;
 };
 
@@ -51,6 +52,7 @@ const MUSIC_CARDS: MusicCard[] = [
     status: 'Playing',
     color: 'from-green-500 to-teal-600',
     trackPath: '/sounds/recorder-piece.mp3',
+    mobileTrackPath: '/sounds/mobile/recorder-piece-mobile.mp3',
   },
   {
     icon: '🎹',
@@ -59,6 +61,7 @@ const MUSIC_CARDS: MusicCard[] = [
     status: 'Practicing',
     color: 'from-purple-500 to-pink-600',
     trackPath: '/sounds/piano-piece.mp3',
+    mobileTrackPath: '/sounds/mobile/piano-piece-mobile.mp3',
     isPiano: true,
   },
 ];
@@ -165,6 +168,8 @@ function useAudio() {
   const activeOscillatorsRef = useRef<OscillatorNode[]>([]);
   const activeMediaRef = useRef<HTMLAudioElement[]>([]);
   const mediaTimersRef = useRef<number[]>([]);
+  const activeClipUrlRef = useRef<string | null>(null);
+  const clipPlayingRef = useRef(false);
 
   const loadSample = useCallback(async (instrument: string, ctx: AudioContext): Promise<AudioBuffer | null> => {
     if (sampleCacheRef.current[instrument]) return sampleCacheRef.current[instrument];
@@ -271,6 +276,8 @@ function useAudio() {
   // Stop all currently playing sounds and invalidate pending async clip starts.
   const stopAllSounds = useCallback(() => {
     clipRequestIdRef.current += 1;
+    clipPlayingRef.current = false;
+    activeClipUrlRef.current = null;
     stopActiveSounds();
   }, [stopActiveSounds]);
 
@@ -292,13 +299,23 @@ function useAudio() {
     audio.volume = 0.9;
 
     return new Promise<boolean>((resolve, reject) => {
+      let settled = false;
+      const finish = (result: boolean) => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      };
       const cleanup = () => {
         activeMediaRef.current = activeMediaRef.current.filter(activeAudio => activeAudio !== audio);
       };
 
       audio.onended = () => {
         cleanup();
-        resolve(true);
+        if (clipRequestIdRef.current === requestId) {
+          clipPlayingRef.current = false;
+          activeClipUrlRef.current = null;
+        }
+        finish(true);
       };
 
       activeMediaRef.current.push(audio);
@@ -308,7 +325,11 @@ function useAudio() {
           audio.currentTime = 0;
         } catch {}
         cleanup();
-        resolve(true);
+        if (clipRequestIdRef.current === requestId) {
+          clipPlayingRef.current = false;
+          activeClipUrlRef.current = null;
+        }
+        finish(true);
       }, maxDuration * 1000);
       if (stopTimer !== null) {
         mediaTimersRef.current.push(stopTimer);
@@ -321,10 +342,12 @@ function useAudio() {
         }
         cleanup();
         if (requestId === undefined || clipRequestIdRef.current === requestId) {
+          clipPlayingRef.current = false;
+          activeClipUrlRef.current = null;
           reject(error);
           return;
         }
-        resolve(false);
+        finish(false);
       });
     });
   }, [getMediaTemplate]);
@@ -476,6 +499,10 @@ function useAudio() {
         void ctx.resume().catch(() => undefined);
       }
 
+      stopActiveSounds();
+      clipPlayingRef.current = false;
+      activeClipUrlRef.current = null;
+
       const isTonal = instrument === 'piano' || instrument === 'clarinet' || instrument === 'recorder';
       const isCombat = instrument === 'kick' || instrument === 'punch' || instrument === 'block';
       if (isTonal) {
@@ -495,7 +522,7 @@ function useAudio() {
         return;
       }
     } catch { /* silent fail */ }
-  }, [getAudioContext, playMediaClip, playPercussionFallback, playSynthNote]);
+  }, [getAudioContext, playMediaClip, playPercussionFallback, playSynthNote, stopActiveSounds]);
 
   // Play a sound clip from a URL path (max duration in seconds, default 5)
   const playSoundClip = useCallback((url: string, maxDuration?: number) => {
@@ -505,9 +532,17 @@ function useAudio() {
       if (ctx.state !== 'running') {
         void ctx.resume().catch(() => undefined);
       }
+
+      if (clipPlayingRef.current && activeClipUrlRef.current === url) {
+        stopAllSounds();
+        return;
+      }
+
       const requestId = clipRequestIdRef.current + 1;
       clipRequestIdRef.current = requestId;
       stopActiveSounds();
+      activeClipUrlRef.current = url;
+      clipPlayingRef.current = true;
       playMediaClip(url, maxDuration, requestId).catch(() => {
         loadSample(url, ctx).then(buf => {
           if (!buf || clipRequestIdRef.current !== requestId) return;
@@ -523,11 +558,22 @@ function useAudio() {
           src.start(now);
           src.stop(now + dur);
           activeSourcesRef.current.push(src);
-          src.onended = () => { activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== src); };
-        }).catch(() => {});
+          src.onended = () => {
+            activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== src);
+            if (clipRequestIdRef.current === requestId) {
+              clipPlayingRef.current = false;
+              activeClipUrlRef.current = null;
+            }
+          };
+        }).catch(() => {
+          if (clipRequestIdRef.current === requestId) {
+            clipPlayingRef.current = false;
+            activeClipUrlRef.current = null;
+          }
+        });
       });
     } catch {}
-  }, [getAudioContext, loadSample, playMediaClip, stopActiveSounds]);
+  }, [getAudioContext, loadSample, playMediaClip, stopActiveSounds, stopAllSounds]);
 
   return { playNote, playSoundClip, initAudio, stopAllSounds };
 }
@@ -949,6 +995,8 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [activeSection, setActiveSection] = useState(0);
   const [showPiano, setShowPiano] = useState(false);
+  const [isMobileDevice, setIsMobileDevice] = useState(false);
+  const [activeTrack, setActiveTrack] = useState<string | null>(null);
   const [pokeEffect, setPokeEffect] = useState<{ type: string; x: number; y: number } | null>(null);
   const prefersReducedMotion = usePrefersReducedMotion();
   const sparkles = useSparkles(prefersReducedMotion ? 0 : 12);
@@ -961,6 +1009,31 @@ export default function Home() {
       playSoundClip(`/sounds/pokemon/${pokemonName.toLowerCase()}.mp3`, 5);
     }
   };
+
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobileDevice(window.innerWidth < 768 || /iPhone|iPod|Android.*Mobile/i.test(navigator.userAgent));
+    };
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+
+  const handleMusicCardPlay = useCallback((item: MusicCard) => {
+    initAudio();
+    const selectedTrack = isMobileDevice && item.mobileTrackPath ? item.mobileTrackPath : item.trackPath;
+    if (activeTrack === selectedTrack) {
+      stopAllSounds();
+      setActiveTrack(null);
+      return;
+    }
+    playSoundClip(selectedTrack);
+    setActiveTrack(selectedTrack);
+    const clearAfterMs = item.name === 'Clarinet' ? 16000 : 19000;
+    window.setTimeout(() => {
+      setActiveTrack(current => (current === selectedTrack ? null : current));
+    }, clearAfterMs);
+  }, [activeTrack, initAudio, isMobileDevice, playSoundClip, stopAllSounds]);
 
   useEffect(() => {
     if (loading) return;
@@ -1085,24 +1158,29 @@ export default function Home() {
             {MUSIC_CARDS.map((item, i) => (
               <TiltCard key={i}>
                 <div className={`p-6 rounded-3xl bg-gradient-to-br ${item.color} text-center shadow-xl group`}>
-                  <button
-                    type="button"
-                    onClick={() => { initAudio(); stopAllSounds(); playSoundClip(item.trackPath); }}
-                    className="w-full cursor-pointer"
-                  >
+                  <div className="w-full">
                     <div className="text-6xl mb-4">{item.icon}</div>
                     <h3 className="text-2xl font-bold mb-2">{item.name}</h3>
                     <p className="text-white/80 mb-3">{item.desc}</p>
                     <span className="px-4 py-1 bg-white/20 rounded-full text-sm">{item.status}</span>
-                    <p className="text-xs mt-2 text-white/50">🎵 Click to hear the full music piece!</p>
-                  </button>
-                  {item.isPiano && (
+                    <p className="text-xs mt-2 text-white/50">🎵 Tap play to hear the music!</p>
+                  </div>
+                  <div className="mt-4 flex flex-col items-center gap-3">
                     <button
                       type="button"
-                      onClick={(e) => { e.stopPropagation(); initAudio(); stopAllSounds(); setShowPiano(true); }}
-                      className="mt-3 px-5 py-2 bg-white/25 hover:bg-white/40 rounded-full text-sm font-semibold transition-all hover:scale-105 backdrop-blur-sm border border-white/20"
-                    >🎹 Open Virtual Piano</button>
-                  )}
+                      onClick={() => handleMusicCardPlay(item)}
+                      className="min-w-[140px] px-5 py-2.5 bg-black/20 hover:bg-black/30 rounded-full text-sm font-semibold transition-all hover:scale-105 backdrop-blur-sm border border-white/20"
+                    >
+                      {activeTrack === (isMobileDevice && item.mobileTrackPath ? item.mobileTrackPath : item.trackPath) ? '⏹ Stop' : '▶️ Play'}
+                    </button>
+                    {item.isPiano && (
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); initAudio(); stopAllSounds(); setActiveTrack(null); setShowPiano(true); }}
+                        className="px-5 py-2 bg-white/25 hover:bg-white/40 rounded-full text-sm font-semibold transition-all hover:scale-105 backdrop-blur-sm border border-white/20"
+                      >🎹 Open Virtual Piano</button>
+                    )}
+                  </div>
                 </div>
               </TiltCard>
             ))}

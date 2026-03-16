@@ -130,21 +130,27 @@ export default function MonkeyBananaGame() {
     setRunning(true);
   }, []);
 
-  const handlePointer = useCallback((clientX: number) => {
+  const handlePointer = useCallback((clientX: number, immediate = false) => {
     if (!arenaRef.current) return;
     const rect = arenaRef.current.getBoundingClientRect();
-    setMonkeyTarget(((clientX - rect.left) / rect.width) * 100);
+    const percent = ((clientX - rect.left) / rect.width) * 100;
+    setMonkeyTarget(percent);
+    if (immediate) {
+      const next = Math.max(8, Math.min(92, percent));
+      monkeyXRef.current = next;
+      setMonkeyX(next);
+    }
   }, [setMonkeyTarget]);
 
   const handlePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     draggingPointerIdRef.current = event.pointerId;
     event.currentTarget.setPointerCapture(event.pointerId);
-    handlePointer(event.clientX);
+    handlePointer(event.clientX, event.pointerType !== 'mouse');
   }, [handlePointer]);
 
   const handlePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     if (event.pointerType !== 'mouse' && draggingPointerIdRef.current !== event.pointerId) return;
-    handlePointer(event.clientX);
+    handlePointer(event.clientX, event.pointerType !== 'mouse');
   }, [handlePointer]);
 
   const handlePointerUp = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
